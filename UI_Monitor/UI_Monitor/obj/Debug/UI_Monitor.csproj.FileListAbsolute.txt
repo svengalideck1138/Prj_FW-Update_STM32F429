@@ -1,0 +1,9 @@
+C:\Users\Zhenyu\MySource\Git\Prj_FW-Update_STM32F429\UI_Monitor\UI_Monitor\bin\Debug\UI_Monitor.exe.config
+C:\Users\Zhenyu\MySource\Git\Prj_FW-Update_STM32F429\UI_Monitor\UI_Monitor\bin\Debug\UI_Monitor.exe
+C:\Users\Zhenyu\MySource\Git\Prj_FW-Update_STM32F429\UI_Monitor\UI_Monitor\bin\Debug\UI_Monitor.pdb
+C:\Users\Zhenyu\MySource\Git\Prj_FW-Update_STM32F429\UI_Monitor\UI_Monitor\obj\Debug\UI_Monitor.csproj.AssemblyReference.cache
+C:\Users\Zhenyu\MySource\Git\Prj_FW-Update_STM32F429\UI_Monitor\UI_Monitor\obj\Debug\UI_Monitor.Properties.Resources.resources
+C:\Users\Zhenyu\MySource\Git\Prj_FW-Update_STM32F429\UI_Monitor\UI_Monitor\obj\Debug\UI_Monitor.csproj.GenerateResource.cache
+C:\Users\Zhenyu\MySource\Git\Prj_FW-Update_STM32F429\UI_Monitor\UI_Monitor\obj\Debug\UI_Monitor.csproj.CoreCompileInputs.cache
+C:\Users\Zhenyu\MySource\Git\Prj_FW-Update_STM32F429\UI_Monitor\UI_Monitor\obj\Debug\UI_Monitor.exe
+C:\Users\Zhenyu\MySource\Git\Prj_FW-Update_STM32F429\UI_Monitor\UI_Monitor\obj\Debug\UI_Monitor.pdb
