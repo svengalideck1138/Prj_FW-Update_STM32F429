@@ -44,17 +44,19 @@ _Min_Stack_Size = 0x400; /* required amount of stack */
 
 /* Memories definition */
 /*
- * === Application (FW_APP) ===
- * Flash 앞 64KB는 부트로더 몫이므로, 앱은 0x0801_0000부터 시작한다.
- *   Bootloader : 0x0800_0000 ~ 0x0800_FFFF  (64KB, FW_BOOT)
- *   Application: 0x0801_0000 ~ 끝            (2048K - 64K = 1984K)  <- 이 프로젝트
- * ORIGIN을 바꿨으니 앱 main()에서 SCB->VTOR = 0x08010000 설정 필수!
+ * === Application (FW_APP) : 실행 영역 ===
+ * 메모리 맵 (flash_if.h와 일치):
+ *   Bootloader   0x0800_0000  64KB    (섹터 0~3)
+ *   Metadata     0x0801_0000  64KB    (섹터 4)
+ *   App 실행영역  0x0802_0000  896KB   (섹터 5~11)  <- 이 프로젝트
+ *   Staging      0x0810_0000  896KB   (섹터 12~22)
+ * ORIGIN을 바꿨으니 앱 main()에서 SCB->VTOR = 0x08020000 설정 필수!
  */
 MEMORY
 {
   CCMRAM    (xrw)    : ORIGIN = 0x10000000,   LENGTH = 64K
   RAM    (xrw)    : ORIGIN = 0x20000000,   LENGTH = 192K
-  FLASH    (rx)    : ORIGIN = 0x8010000,   LENGTH = 1984K
+  FLASH    (rx)    : ORIGIN = 0x8020000,   LENGTH = 896K
 }
 
 /* Sections */

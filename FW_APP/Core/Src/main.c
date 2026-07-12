@@ -22,7 +22,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "flash_if.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -63,7 +63,7 @@ static void MX_ETH_Init(void);
 static void MX_USART3_UART_Init(void);
 static void MX_USB_OTG_FS_PCD_Init(void);
 /* USER CODE BEGIN PFP */
-
+static void App_EnterDownloadMode(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -81,9 +81,9 @@ int main(void)
   /* USER CODE BEGIN 1 */
 
   /* === 벡터 테이블 재배치 (★필수) ===
-   * 이 앱은 0x0801_0000에 위치하므로, 인터럽트 벡터 테이블 위치를 CPU에 알려준다.
+   * 이 앱은 0x0802_0000(실행영역)에 위치하므로, 인터럽트 벡터 테이블 위치를 CPU에 알려준다.
    * 이 줄이 없으면 인터럽트 발생 시 CPU가 부트로더(0x0800_0000)의 핸들러로 점프해 오동작한다. */
-  SCB->VTOR = 0x08010000U;
+  SCB->VTOR = 0x08020000U;
 
   /* USER CODE END 1 */
 
@@ -109,7 +109,7 @@ int main(void)
    * LED 루프에 도달하지 못한다. 점프 검증을 위해 호출을 막아둔다.
    * (영구 반영하려면 CubeMX .ioc에서 ETH/USB/USART3을 Disable 후 재생성) */
   // MX_ETH_Init();
-  // MX_USART3_UART_Init();
+  MX_USART3_UART_Init();   /* [4단계] 앱이 UART로 업데이트 명령/펌웨어 수신 */
   // MX_USB_OTG_FS_PCD_Init();
   /* USER CODE BEGIN 2 */
 
@@ -123,36 +123,40 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
 
-    /* === 애플리케이션 동작 표시 ===
-     * 여기까지 왔다 = 부트로더가 앱으로 점프 성공 + VTOR 재배치 정상.
-     * 부트로더 모드(LD3 단독 깜빡임)와 구분되게 LD1->LD2->LD3 순차 점등한다. */
-	HAL_GPIO_WritePin(LD1_GPIO_Port, LD1_Pin, GPIO_PIN_SET);
-	HAL_Delay(100);
-	HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_SET);
-	HAL_Delay(100);
-	HAL_GPIO_WritePin(LD3_GPIO_Port, LD3_Pin, GPIO_PIN_SET);
-	HAL_Delay(100);
+    /* === 앱 정상 모드 ===
+     * · LD1(초록)을 0.5초마다 토글 = 앱 정상 실행 중(하트비트)
+     * · 동시에 UART로 "FWUPDATE" 명령을 감시 → 수신되면 다운로드 모드로 전환
+     * (베어메탈: 짧은 타임아웃 폴링으로 통신 감시와 LED를 함께 처리) */
+    static const char FW_UPDATE_CMD[] = "FWUPDATE";
+    static uint8_t  cmdIdx   = 0U;
+    static uint32_t lastBlink = 0U;
+    uint8_t ch;
 
-	HAL_GPIO_WritePin(LD1_GPIO_Port, LD1_Pin, GPIO_PIN_RESET);
-	HAL_Delay(100);
-	HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_RESET);
-	HAL_Delay(100);
-	HAL_GPIO_WritePin(LD3_GPIO_Port, LD3_Pin, GPIO_PIN_RESET);
-	HAL_Delay(100);
+    /* UART 1바이트 폴링 (10ms 타임아웃) */
+    if (HAL_UART_Receive(&huart3, &ch, 1U, 10U) == HAL_OK)
+    {
+      if (ch == (uint8_t)FW_UPDATE_CMD[cmdIdx])
+      {
+        cmdIdx++;
+        if (FW_UPDATE_CMD[cmdIdx] == '\0')   /* "FWUPDATE" 전체 매칭 */
+        {
+          App_EnterDownloadMode();           /* 다운로드 모드 진입 (현재는 돌아오지 않음) */
+          cmdIdx = 0U;
+        }
+      }
+      else
+      {
+        /* 불일치: 방금 글자가 명령 첫 글자면 1, 아니면 0으로 리셋 */
+        cmdIdx = (ch == (uint8_t)FW_UPDATE_CMD[0]) ? 1U : 0U;
+      }
+    }
 
-	HAL_GPIO_WritePin(LD3_GPIO_Port, LD3_Pin, GPIO_PIN_SET);
-	HAL_Delay(100);
-	HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_SET);
-	HAL_Delay(100);
-	HAL_GPIO_WritePin(LD1_GPIO_Port, LD1_Pin, GPIO_PIN_SET);
-	HAL_Delay(100);
-
-	HAL_GPIO_WritePin(LD3_GPIO_Port, LD3_Pin, GPIO_PIN_RESET);
-	HAL_Delay(100);
-	HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_RESET);
-	HAL_Delay(100);
-	HAL_GPIO_WritePin(LD1_GPIO_Port, LD1_Pin, GPIO_PIN_RESET);
-	HAL_Delay(100);
+    /* 하트비트: 0.5초마다 초록 LED 토글 */
+    if ((HAL_GetTick() - lastBlink) >= 100U)
+    {
+      HAL_GPIO_TogglePin(LD2_GPIO_Port, LD2_Pin);
+      lastBlink = HAL_GetTick();
+    }
   }
   /* USER CODE END 3 */
 }
@@ -377,6 +381,95 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+
+/**
+  * @brief  "FWUPDATE" 명령 수신 시 진입하는 다운로드 모드. [4b 단계]
+  * @note   프로토콜:
+  *           PC → "READY" 응답을 보고 [전체크기 4B, LE] 전송
+  *           MCU → Staging 지우기 → ACK/NACK
+  *           PC → 256B 청크 반복 전송, MCU는 청크마다 Staging 기록 후 ACK
+  *           MCU → 전부 받으면 "DONE" 전송
+  *         [5단계 예정] DONE 후 플래그 세팅 + 재부팅. 지금은 파랑 켠 채 멈춤.
+  */
+static void App_EnterDownloadMode(void)
+{
+  const char ready[] = "READY\r\n";
+  const char done[]  = "DONE\r\n";
+  uint8_t  ack = 0x79U, nack = 0x1FU;
+  uint8_t  buf[256];
+  uint8_t  sizeBytes[4];
+  uint32_t total, addr, remaining;
+
+  HAL_GPIO_WritePin(LD1_GPIO_Port, LD1_Pin, GPIO_PIN_RESET);   /* 초록 끔 */
+  HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_SET);     /* 파랑: 다운로드 모드 */
+  HAL_UART_Transmit(&huart3, (uint8_t *)ready, sizeof(ready) - 1U, HAL_MAX_DELAY);
+
+  /* 1) 전체 크기(4바이트, little-endian) 수신 */
+  if (HAL_UART_Receive(&huart3, sizeBytes, 4U, HAL_MAX_DELAY) != HAL_OK) goto stop;
+  total = (uint32_t)sizeBytes[0]
+        | ((uint32_t)sizeBytes[1] << 8)
+        | ((uint32_t)sizeBytes[2] << 16)
+        | ((uint32_t)sizeBytes[3] << 24);
+
+  /* 크기 유효성 검사 */
+  if ((total == 0U) || (total > STAGING_SIZE))
+  {
+    HAL_UART_Transmit(&huart3, &nack, 1U, HAL_MAX_DELAY);
+    goto stop;
+  }
+
+  /* 2) Staging 영역에서 필요한 만큼 지우기 */
+  if (FlashIf_EraseRange(STAGING_ADDRESS, STAGING_ADDRESS + total - 1U) != FLASH_IF_OK)
+  {
+    HAL_UART_Transmit(&huart3, &nack, 1U, HAL_MAX_DELAY);
+    goto stop;
+  }
+  HAL_UART_Transmit(&huart3, &ack, 1U, HAL_MAX_DELAY);   /* 지우기 완료 ACK */
+
+  /* 3) 청크 수신 → Staging 기록 (청크마다 ACK) */
+  addr = STAGING_ADDRESS;
+  remaining = total;
+  while (remaining > 0U)
+  {
+    uint32_t n = (remaining > sizeof(buf)) ? sizeof(buf) : remaining;
+
+    if (HAL_UART_Receive(&huart3, buf, (uint16_t)n, HAL_MAX_DELAY) != HAL_OK) goto stop;
+
+    /* Flash는 4바이트 단위 → 꼬리는 0xFF로 패딩 */
+    uint32_t nAligned = (n + 3U) & ~3U;
+    for (uint32_t i = n; i < nAligned; i++) buf[i] = 0xFFU;
+
+    if (FlashIf_Write(addr, buf, nAligned) != FLASH_IF_OK)
+    {
+      HAL_UART_Transmit(&huart3, &nack, 1U, HAL_MAX_DELAY);
+      goto stop;
+    }
+    HAL_UART_Transmit(&huart3, &ack, 1U, HAL_MAX_DELAY);   /* 청크 ACK */
+
+    addr += n;
+    remaining -= n;
+    HAL_GPIO_TogglePin(LD3_GPIO_Port, LD3_Pin);            /* 진행 표시 */
+  }
+
+  /* 4) 완료 응답 */
+  HAL_UART_Transmit(&huart3, (uint8_t *)done, sizeof(done) - 1U, HAL_MAX_DELAY);
+
+  /* 5) '업데이트 대기' 플래그(메타데이터) 기록 후 재부팅 → 부트로더가 적용 */
+  {
+    FwMeta meta;
+    meta.magic    = FW_UPDATE_MAGIC;
+    meta.size     = total;
+    meta.crc      = 0U;
+    meta.reserved = 0U;
+    FlashIf_WriteMeta(&meta);
+  }
+  HAL_Delay(100);          /* UART 송신/플래시 마무리 여유 */
+  NVIC_SystemReset();      /* 재부팅 (돌아오지 않음) */
+
+stop:
+  HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_SET);   /* 파랑 유지 (오류 시) */
+  while (1) { }
+}
 
 /* USER CODE END 4 */
 

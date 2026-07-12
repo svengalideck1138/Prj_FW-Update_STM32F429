@@ -22,7 +22,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "flash_if.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -33,8 +33,7 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 
-/* 앱(FW_APP)이 구워질 Flash 시작 주소 (FW_APP 링커의 0x0801_0000과 반드시 일치) */
-#define APP_ADDRESS      0x08010000U
+/* APP_ADDRESS(0x0801_0000)는 flash_if.h에 정의됨 */
 
 /* RAM 범위: 앱의 초기 스택 포인터가 이 안에 있어야 "유효한 앱"으로 판단 (RAM 192KB) */
 #define RAM_START        0x20000000U
@@ -71,6 +70,8 @@ static void MX_USART3_UART_Init(void);
 static void MX_USB_OTG_FS_PCD_Init(void);
 /* USER CODE BEGIN PFP */
 static void BL_JumpToApplication(void);
+static void BL_EnterUpdateMode(void);
+static void BL_ApplyPendingUpdate(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -111,6 +112,18 @@ int main(void)
   MX_USART3_UART_Init();
   MX_USB_OTG_FS_PCD_Init();
   /* USER CODE BEGIN 2 */
+
+  /* 재부팅 시 '업데이트 대기' 플래그가 있으면 Staging을 실행영역에 복사(적용)한다.
+   * 앱이 새 펌웨어를 Staging에 받고 재부팅하면 여기서 실제 적용이 일어난다. */
+  BL_ApplyPendingUpdate();
+
+  /* USER 버튼(파랑 B1, PC13)을 누른 채 리셋하면 '업데이트 모드'로 진입한다.
+   * (나중에는 앱이 세팅한 '업데이트 플래그'로도 진입시킬 예정)
+   * 업데이트 모드에서는 앱으로 점프하지 않고 UART로 펌웨어 수신을 대기한다. */
+  if (HAL_GPIO_ReadPin(USER_Btn_GPIO_Port, USER_Btn_Pin) == GPIO_PIN_SET)
+  {
+    BL_EnterUpdateMode();   /* 돌아오지 않음 */
+  }
 
   /* [진단용] 부트로더가 실행됐음을 확인 — 점프 시도 '전'에 LD3를 3회 빠르게 깜빡인다.
    * · 이 3회 깜빡임이 보이면       → 부트로더는 정상 실행됨
@@ -410,6 +423,81 @@ static void BL_JumpToApplication(void)
   __enable_irq();
 
   ((void (*)(void))appEntry)();   /* 여기서 앱이 시작되며, 돌아오지 않는다 */
+}
+
+/**
+  * @brief  업데이트 모드: 앱으로 점프하지 않고 UART(USART3)로 데이터 수신을 대기한다.
+  * @note   [3a 단계] 아직 프로토콜은 없고, UART 링크 검증용이다.
+  *         · 진입 시 배너 문자열 송신 + LD2(파랑) 켜기
+  *         · 1초간 수신 없으면 '.' 하트비트 송신 (수신 전용 뷰어로도 링크 확인)
+  *         · 바이트 수신 시 그대로 echo + LD3(빨강) 토글
+  *         이후 3b에서 프로토콜 파서 + FlashIf_Write() 로 확장한다. (돌아오지 않음)
+  */
+static void BL_EnterUpdateMode(void)
+{
+  const char banner[] = "\r\n[FW_BOOT] Update mode ready (USART3, 115200 8N1)\r\n";
+  uint8_t rxByte;
+
+  HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_SET);   /* 파랑: 업데이트 모드 */
+  HAL_UART_Transmit(&huart3, (uint8_t *)banner, sizeof(banner) - 1U, HAL_MAX_DELAY);
+
+  while (1)
+  {
+    /* USART3으로 1바이트 수신 (1초 타임아웃) */
+    if (HAL_UART_Receive(&huart3, &rxByte, 1U, 1000U) == HAL_OK)
+    {
+      HAL_UART_Transmit(&huart3, &rxByte, 1U, HAL_MAX_DELAY);   /* echo */
+      HAL_GPIO_TogglePin(LD3_GPIO_Port, LD3_Pin);              /* 수신 표시 */
+    }
+    else
+    {
+      /* 1초간 수신 없음 → 하트비트 '.' 송신 */
+      HAL_UART_Transmit(&huart3, (uint8_t *)".", 1U, HAL_MAX_DELAY);
+    }
+  }
+}
+
+/**
+  * @brief  재부팅 시 '업데이트 대기' 플래그(메타데이터)가 있으면
+  *         Staging → 실행영역으로 복사하여 새 펌웨어를 적용한다.
+  * @note   메타데이터가 없으면 즉시 리턴(정상 부팅).
+  *         복사 실패 시 플래그를 유지해 다음 부팅에 재시도한다.
+  */
+static void BL_ApplyPendingUpdate(void)
+{
+  const FwMeta *m = (const FwMeta *)METADATA_ADDRESS;
+
+  if (m->magic != FW_UPDATE_MAGIC)
+  {
+    return;   /* 대기 중인 업데이트 없음 → 정상 부팅 */
+  }
+
+  uint32_t size = m->size;
+  if ((size == 0U) || (size > APP_SIZE))
+  {
+    FlashIf_ClearMeta();   /* 무효한 메타 → 클리어 후 정상 부팅 */
+    return;
+  }
+
+  /* 적용 중 표시: 파랑 LED 켜기 (복사 동안 CPU는 잠깐 멈춰있을 수 있음) */
+  HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_SET);
+
+  /* 1) 실행영역에서 필요한 만큼 지우기 */
+  if (FlashIf_EraseRange(APP_ADDRESS, APP_ADDRESS + size - 1U) != FLASH_IF_OK)
+  {
+    return;   /* 실패: 플래그 유지 → 다음 부팅 재시도 */
+  }
+
+  /* 2) Staging → 실행영역 복사 (Staging은 메모리 매핑이라 포인터로 바로 읽힘) */
+  if (FlashIf_Write(APP_ADDRESS, (const uint8_t *)STAGING_ADDRESS, (size + 3U) & ~3U) != FLASH_IF_OK)
+  {
+    return;   /* 실패: 플래그 유지 → 다음 부팅 재시도 */
+  }
+
+  /* 3) 성공: 플래그 클리어 (한 번만 적용) */
+  FlashIf_ClearMeta();
+
+  HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_RESET);
 }
 
 /* USER CODE END 4 */

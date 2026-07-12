@@ -73,6 +73,7 @@
             this.RadBtn_Byte_Eth = new System.Windows.Forms.RadioButton();
             this.Btn_Clear_EthernetLog = new System.Windows.Forms.Button();
             this.Tbox_Ethernet_ReceivedLog = new System.Windows.Forms.TextBox();
+            this.Btn_READYFORUPDATE = new System.Windows.Forms.Button();
             this.GroupBox_TransferMode.SuspendLayout();
             this.GroupBox_ComportSetting.SuspendLayout();
             this.GroupBox_SocketSetting.SuspendLayout();
@@ -550,11 +551,11 @@
             this.Tbox_RS232_ReceivedLog.ScrollBars = System.Windows.Forms.ScrollBars.Vertical;
             this.Tbox_RS232_ReceivedLog.Size = new System.Drawing.Size(609, 159);
             this.Tbox_RS232_ReceivedLog.TabIndex = 27;
-            //
+            // 
             // GroupBox_ViewerEthernet
-            //
-            this.GroupBox_ViewerEthernet.Anchor = ((System.Windows.Forms.AnchorStyles)((((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Bottom)
-            | System.Windows.Forms.AnchorStyles.Left)
+            // 
+            this.GroupBox_ViewerEthernet.Anchor = ((System.Windows.Forms.AnchorStyles)((((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Bottom) 
+            | System.Windows.Forms.AnchorStyles.Left) 
             | System.Windows.Forms.AnchorStyles.Right)));
             this.GroupBox_ViewerEthernet.Controls.Add(this.RadBtn_ASC_Eth);
             this.GroupBox_ViewerEthernet.Controls.Add(this.RadBtn_Byte_Eth);
@@ -568,10 +569,10 @@
             this.GroupBox_ViewerEthernet.TabStop = false;
             this.GroupBox_ViewerEthernet.Text = "Received Viewer(Ethernet)";
             this.GroupBox_ViewerEthernet.Visible = false;
-            //
+            // 
             // RadBtn_ASC_Eth
-            //
-            this.RadBtn_ASC_Eth.Anchor = ((System.Windows.Forms.AnchorStyles)(((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Left)
+            // 
+            this.RadBtn_ASC_Eth.Anchor = ((System.Windows.Forms.AnchorStyles)(((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Left) 
             | System.Windows.Forms.AnchorStyles.Right)));
             this.RadBtn_ASC_Eth.AutoSize = true;
             this.RadBtn_ASC_Eth.Checked = true;
@@ -583,10 +584,10 @@
             this.RadBtn_ASC_Eth.TabStop = true;
             this.RadBtn_ASC_Eth.Text = "ASCⅡ";
             this.RadBtn_ASC_Eth.UseVisualStyleBackColor = true;
-            //
+            // 
             // RadBtn_Byte_Eth
-            //
-            this.RadBtn_Byte_Eth.Anchor = ((System.Windows.Forms.AnchorStyles)(((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Left)
+            // 
+            this.RadBtn_Byte_Eth.Anchor = ((System.Windows.Forms.AnchorStyles)(((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Left) 
             | System.Windows.Forms.AnchorStyles.Right)));
             this.RadBtn_Byte_Eth.AutoSize = true;
             this.RadBtn_Byte_Eth.Font = new System.Drawing.Font("Microsoft Sans Serif", 8.25F);
@@ -596,9 +597,9 @@
             this.RadBtn_Byte_Eth.TabIndex = 32;
             this.RadBtn_Byte_Eth.Text = "Byte";
             this.RadBtn_Byte_Eth.UseVisualStyleBackColor = true;
-            //
+            // 
             // Btn_Clear_EthernetLog
-            //
+            // 
             this.Btn_Clear_EthernetLog.Anchor = ((System.Windows.Forms.AnchorStyles)((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Right)));
             this.Btn_Clear_EthernetLog.Font = new System.Drawing.Font("Microsoft Sans Serif", 8.25F);
             this.Btn_Clear_EthernetLog.Location = new System.Drawing.Point(550, 12);
@@ -607,11 +608,11 @@
             this.Btn_Clear_EthernetLog.TabIndex = 31;
             this.Btn_Clear_EthernetLog.Text = "Clear";
             this.Btn_Clear_EthernetLog.UseVisualStyleBackColor = true;
-            //
+            // 
             // Tbox_Ethernet_ReceivedLog
-            //
-            this.Tbox_Ethernet_ReceivedLog.Anchor = ((System.Windows.Forms.AnchorStyles)((((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Bottom)
-            | System.Windows.Forms.AnchorStyles.Left)
+            // 
+            this.Tbox_Ethernet_ReceivedLog.Anchor = ((System.Windows.Forms.AnchorStyles)((((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Bottom) 
+            | System.Windows.Forms.AnchorStyles.Left) 
             | System.Windows.Forms.AnchorStyles.Right)));
             this.Tbox_Ethernet_ReceivedLog.Font = new System.Drawing.Font("Microsoft Sans Serif", 8.25F);
             this.Tbox_Ethernet_ReceivedLog.Location = new System.Drawing.Point(5, 48);
@@ -620,12 +621,22 @@
             this.Tbox_Ethernet_ReceivedLog.ScrollBars = System.Windows.Forms.ScrollBars.Vertical;
             this.Tbox_Ethernet_ReceivedLog.Size = new System.Drawing.Size(609, 159);
             this.Tbox_Ethernet_ReceivedLog.TabIndex = 27;
-            //
+            // 
+            // Btn_READYFORUPDATE
+            // 
+            this.Btn_READYFORUPDATE.Location = new System.Drawing.Point(172, 12);
+            this.Btn_READYFORUPDATE.Name = "Btn_READYFORUPDATE";
+            this.Btn_READYFORUPDATE.Size = new System.Drawing.Size(127, 23);
+            this.Btn_READYFORUPDATE.TabIndex = 48;
+            this.Btn_READYFORUPDATE.Text = "READY FOR UPDATE";
+            this.Btn_READYFORUPDATE.UseVisualStyleBackColor = true;
+            // 
             // Form1
-            //
+            // 
             this.AutoScaleDimensions = new System.Drawing.SizeF(6F, 13F);
             this.AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font;
             this.ClientSize = new System.Drawing.Size(800, 414);
+            this.Controls.Add(this.Btn_READYFORUPDATE);
             this.Controls.Add(this.GroupBox_ViewerEthernet);
             this.Controls.Add(this.GroupBox_ViewerRS232);
             this.Controls.Add(this.StatusStrip1);
@@ -697,6 +708,7 @@
         private System.Windows.Forms.RadioButton RadBtn_Byte_Eth;
         private System.Windows.Forms.Button Btn_Clear_EthernetLog;
         private System.Windows.Forms.TextBox Tbox_Ethernet_ReceivedLog;
+        private System.Windows.Forms.Button Btn_READYFORUPDATE;
     }
 }
 
