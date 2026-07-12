@@ -11,13 +11,13 @@
 *.vsidx
 
 # ==============================================================
-#  STM32CubeIDE (MCU firmware)
+#  STM32CubeIDE (MCU firmware: FW_BOOT, FW_APP)
 # ==============================================================
-# 빌드 산출물 폴더 (Debug/Release)
-MCU_STM32/Debug/
-MCU_STM32/Release/
+# 빌드 산출물 폴더 (모든 프로젝트의 Debug/Release)
+Debug/
+Release/
 
-# 컴파일 산출물
+# 컴파일 산출물 (어디에 있든)
 *.o
 *.d
 *.su
