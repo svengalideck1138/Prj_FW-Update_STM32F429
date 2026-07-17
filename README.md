@@ -46,9 +46,8 @@ NUCLEO-F429ZI 보드를 대상으로, **ST-Link 없이** **UART 또는 Ethernet*
 ---
 
 ## 2. 메모리 맵 (STM32F429ZI Flash 2MB)
-
+![Memory Map](docs/Memory%20Map.png)
 `FW_BOOT/Core/Inc/flash_if.h` 에 단일 정의(양쪽 프로젝트 공용, 각 슬롯 512KB 대칭).
-
 ```
 ┌──────────────────────────────────────────────────────────┐
 │ Bootloader   0x0800_0000 ~ 0x0800_FFFF   64KB  (섹터 0~3) │  검증/적용/롤백/점프
@@ -85,8 +84,6 @@ NUCLEO-F429ZI 보드를 대상으로, **ST-Link 없이** **UART 또는 Ethernet*
   <img src="docs/Linker%20script%20%EC%84%A4%EC%A0%95.png" alt="FW_APP 링커 스크립트 FLASH 영역 설정" width="560">
   <br><em>FW_APP <code>STM32F429ZITX_FLASH.ld</code> — FLASH 영역을 App 슬롯(0x0802_0000 / 512K)으로 직접 설정</em>
 </p>
-
-![Memory Map](docs/Memory%20Map.png)
 
 ---
 
