@@ -69,6 +69,23 @@ NUCLEO-F429ZI 보드를 대상으로, **ST-Link 없이** **UART 또는 Ethernet*
 - **Factory**: 첫 ST-Link 펌웨어가 최초 부팅 시 자동 복사되어 롤백 복귀처가 됨(이후 불변)
 - **XIP**: STM32는 코드를 Flash에서 직접 실행. RAM엔 변수/스택 + 수신 버퍼만.
 
+> **⚠️ 주소 배치 = 링커 스크립트 + `SCB->VTOR` (둘 다 필수)**
+> 각 프로젝트를 지정 슬롯에 놓으려면 **소스 수정만으로는 부족**하고, 링커 스크립트 `STM32F429ZITX_FLASH.ld`의 `FLASH` 영역도 함께 맞춰야 한다.
+>
+> | 프로젝트 | `.ld` FLASH 영역 | 추가 |
+> |---|---|---|
+> | **FW_BOOT** | `ORIGIN = 0x08000000, LENGTH = 64K` | — |
+> | **FW_APP** | `ORIGIN = 0x08020000, LENGTH = 512K` | 앱 `main()`에서 `SCB->VTOR = 0x08020000` |
+>
+> - 링커 **`ORIGIN`** = 벡터테이블·코드·상수가 **빌드 시 링크되는 절대주소**, **`SCB->VTOR`** = **런타임에 CPU가 벡터테이블을 찾는 위치** → 둘이 어긋나면 점프 후 크래시.
+> - 링커 **`LENGTH`** = 슬롯 크기 제한(App이 Factory/Staging를 침범하지 못하게).
+> - (FW_APP `.ld`에 관련 주석 있음. CubeMX 재생성 시 `.ld`의 `ORIGIN/LENGTH`가 기본값으로 되돌아가지 않았는지 확인할 것.)
+
+<p align="center">
+  <img src="docs/Linker%20script%20%EC%84%A4%EC%A0%95.png" alt="FW_APP 링커 스크립트 FLASH 영역 설정" width="560">
+  <br><em>FW_APP <code>STM32F429ZITX_FLASH.ld</code> — FLASH 영역을 App 슬롯(0x0802_0000 / 512K)으로 직접 설정</em>
+</p>
+
 ![Memory Map](docs/Memory%20Map.png)
 
 ---
