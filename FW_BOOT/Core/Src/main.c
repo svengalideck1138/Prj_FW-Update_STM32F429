@@ -54,6 +54,8 @@ ETH_DMADescTypeDef  DMATxDscrTab[ETH_TX_DESC_CNT]; /* Ethernet Tx DMA Descriptor
 
 ETH_HandleTypeDef heth;
 
+IWDG_HandleTypeDef hiwdg;
+
 UART_HandleTypeDef huart3;
 
 PCD_HandleTypeDef hpcd_USB_OTG_FS;
@@ -68,10 +70,15 @@ static void MX_GPIO_Init(void);
 static void MX_ETH_Init(void);
 static void MX_USART3_UART_Init(void);
 static void MX_USB_OTG_FS_PCD_Init(void);
+static void MX_IWDG_Init(void);
 /* USER CODE BEGIN PFP */
 static void BL_JumpToApplication(void);
 static void BL_EnterUpdateMode(void);
-static void BL_ApplyPendingUpdate(void);
+static void BL_HandleUpdate(void);
+static uint8_t BL_ApplyStagingToApp(uint32_t size, uint32_t expectCrc);
+static void BL_Rollback(void);
+static void BL_StartWatchdog(void);
+static void BL_EnsureFactory(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -111,11 +118,23 @@ int main(void)
   MX_ETH_Init();
   MX_USART3_UART_Init();
   MX_USB_OTG_FS_PCD_Init();
+  /* [중요] IWDG를 여기서 자동 시작하지 않는다.
+   * 부트로더의 긴 Flash 작업(Factory 캡처/적용/롤백, 최대 수 초~십 초)이
+   * 워치독 타임아웃보다 오래 걸리면 부트로더가 자기 자신을 리셋해 부팅 루프에 빠진다.
+   * IWDG는 TRIAL 앱으로 점프하기 직전 BL_StartWatchdog()에서만 켠다.
+   * ※ CubeMX가 재생성될 때 아래 자동 호출이 다시 살아나면 반드시 다시 주석 처리할 것. */
+  /* MX_IWDG_Init();  <-- 자동 시작 비활성화 (BL_StartWatchdog에서 대신 호출) */
   /* USER CODE BEGIN 2 */
 
-  /* 재부팅 시 '업데이트 대기' 플래그가 있으면 Staging을 실행영역에 복사(적용)한다.
-   * 앱이 새 펌웨어를 Staging에 받고 재부팅하면 여기서 실제 적용이 일어난다. */
-  BL_ApplyPendingUpdate();
+  /* 최초 부팅: Factory 슬롯이 비어있으면 현재 App을 Factory로 복사해 골든 이미지를 확보한다.
+   * (첫 ST-Link 펌웨어가 롤백 복귀처가 됨. 이후로는 절대 안 건드림) */
+  BL_EnsureFactory();
+
+  /* Metadata 상태 머신 처리:
+   *   PENDING  → Staging 적용 → TRIAL(워치독 켜고 시험 부팅)
+   *   TRIAL    → (확인 실패로 재리셋됨) → 롤백(Factory→App)
+   *   CONFIRMED→ 메타 클리어(정상 확정) */
+  BL_HandleUpdate();
 
   /* USER 버튼(파랑 B1, PC13)을 누른 채 리셋하면 '업데이트 모드'로 진입한다.
    * (나중에는 앱이 세팅한 '업데이트 플래그'로도 진입시킬 예정)
@@ -176,8 +195,9 @@ void SystemClock_Config(void)
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_LSI|RCC_OSCILLATORTYPE_HSE;
   RCC_OscInitStruct.HSEState = RCC_HSE_BYPASS;
+  RCC_OscInitStruct.LSIState = RCC_LSI_ON;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
   RCC_OscInitStruct.PLL.PLLM = 4;
@@ -250,6 +270,34 @@ static void MX_ETH_Init(void)
   /* USER CODE BEGIN ETH_Init 2 */
 
   /* USER CODE END ETH_Init 2 */
+
+}
+
+/**
+  * @brief IWDG Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_IWDG_Init(void)
+{
+
+  /* USER CODE BEGIN IWDG_Init 0 */
+
+  /* USER CODE END IWDG_Init 0 */
+
+  /* USER CODE BEGIN IWDG_Init 1 */
+
+  /* USER CODE END IWDG_Init 1 */
+  hiwdg.Instance = IWDG;
+  hiwdg.Init.Prescaler = IWDG_PRESCALER_256;
+  hiwdg.Init.Reload = 500;
+  if (HAL_IWDG_Init(&hiwdg) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN IWDG_Init 2 */
+
+  /* USER CODE END IWDG_Init 2 */
 
 }
 
@@ -458,45 +506,136 @@ static void BL_EnterUpdateMode(void)
 }
 
 /**
-  * @brief  재부팅 시 '업데이트 대기' 플래그(메타데이터)가 있으면
-  *         Staging → 실행영역으로 복사하여 새 펌웨어를 적용한다.
-  * @note   메타데이터가 없으면 즉시 리턴(정상 부팅).
-  *         복사 실패 시 플래그를 유지해 다음 부팅에 재시도한다.
+  * @brief  Staging → 실행영역으로 복사·검증한다 (erase + copy + CRC 검증).
+  * @return 1: 성공, 0: 실패(Staging 손상 / flash 오류)
   */
-static void BL_ApplyPendingUpdate(void)
+static uint8_t BL_ApplyStagingToApp(uint32_t size, uint32_t expectCrc)
+{
+  if ((size == 0U) || (size > APP_SIZE)) return 0U;
+
+  /* Staging 무결성 (보관 중 손상 확인) */
+  if (FlashIf_Crc32((const uint8_t *)STAGING_ADDRESS, size) != expectCrc) return 0U;
+
+  HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_SET);   /* 적용 중: 파랑 */
+
+  if (FlashIf_EraseRange(APP_ADDRESS, APP_ADDRESS + size - 1U) != FLASH_IF_OK) return 0U;
+  if (FlashIf_Write(APP_ADDRESS, (const uint8_t *)STAGING_ADDRESS, (size + 3U) & ~3U) != FLASH_IF_OK) return 0U;
+  if (FlashIf_Crc32((const uint8_t *)APP_ADDRESS, size) != expectCrc) return 0U;   /* 복사 결과 검증 */
+
+  HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_RESET);
+  return 1U;
+}
+
+/**
+  * @brief  Factory(골든 이미지)를 실행영역으로 복사하여 롤백한다.
+  */
+static void BL_Rollback(void)
+{
+  HAL_GPIO_WritePin(LD3_GPIO_Port, LD3_Pin, GPIO_PIN_SET);   /* 롤백 중: 빨강 */
+  if (FlashIf_EraseRange(APP_ADDRESS, APP_END_ADDRESS) == FLASH_IF_OK)
+  {
+    FlashIf_Write(APP_ADDRESS, (const uint8_t *)FACTORY_ADDRESS, APP_SIZE);
+  }
+  HAL_GPIO_WritePin(LD3_GPIO_Port, LD3_Pin, GPIO_PIN_RESET);
+}
+
+/**
+  * @brief  독립 워치독(IWDG)을 켠다 (약 4초). 시험 부팅 앱이 주기적으로 갱신(pet)하지 않으면 리셋된다.
+  * @note   IWDG는 한 번 켜지면 리셋 전까지 못 끈다 → 시험(TRIAL) 부팅에서만 켠다.
+  */
+static void BL_StartWatchdog(void)
+{
+  /* CubeMX가 생성한 설정(프리스케일 /256, 리로드 500 ≈ 4초)으로 IWDG를 시작한다.
+   * HAL_IWDG_Init()가 내부에서 IWDG를 켜므로, 이 시점(=TRIAL 점프 직전) 이후로는
+   * 앱이 주기적으로 갱신(pet)하지 않으면 리셋된다. */
+  MX_IWDG_Init();
+}
+
+/**
+  * @brief  Metadata 상태 머신을 처리한다 (적용/시험/롤백/확인). 부팅마다 호출된다.
+  */
+static void BL_HandleUpdate(void)
 {
   const FwMeta *m = (const FwMeta *)METADATA_ADDRESS;
+  FwMeta meta;
 
   if (m->magic != FW_UPDATE_MAGIC)
   {
-    return;   /* 대기 중인 업데이트 없음 → 정상 부팅 */
+    return;   /* 유효 메타 없음 → 정상 부팅 */
   }
+  meta = *m;
 
-  uint32_t size = m->size;
-  if ((size == 0U) || (size > APP_SIZE))
+  switch (meta.state)
   {
-    FlashIf_ClearMeta();   /* 무효한 메타 → 클리어 후 정상 부팅 */
+    case FW_STATE_PENDING:
+      /* 새 펌웨어 적용 성공 → TRIAL로 전환, 워치독 켜고 시험 부팅 */
+      if (BL_ApplyStagingToApp(meta.size, meta.crc))
+      {
+        meta.state    = FW_STATE_TRIAL;
+        meta.attempts = 1U;
+        FlashIf_WriteMeta(&meta);
+        BL_StartWatchdog();
+      }
+      /* 적용 실패 → PENDING 유지, 다음 부팅 재시도 */
+      break;
+
+    case FW_STATE_TRIAL:
+      /* 여기 도달 = 직전 시험 부팅이 CONFIRMED에 못 가고 (워치독으로) 리셋됨 */
+      if (meta.attempts >= FW_MAX_TRIALS)
+      {
+        BL_Rollback();          /* 시험 실패 → Factory로 복귀 */
+        FlashIf_ClearMeta();
+      }
+      else
+      {
+        meta.attempts++;
+        FlashIf_WriteMeta(&meta);
+        BL_StartWatchdog();     /* 한 번 더 시험 */
+      }
+      break;
+
+    case FW_STATE_CONFIRMED:
+      FlashIf_ClearMeta();      /* 정상 확인됨 → 메타 클리어, 이후 정상 부팅 */
+      break;
+
+    default:
+      break;                    /* NONE 등 → 정상 부팅 */
+  }
+}
+
+/**
+  * @brief  Factory 슬롯이 비어있으면 현재 App 슬롯 전체를 Factory로 복사한다.
+  * @note   최초 1회만 실행(첫 펌웨어를 골든 이미지로 확보). 이후엔 Factory가 유효하므로 즉시 리턴.
+  *         App 슬롯 전체(512KB)를 복사하므로 최초 부팅은 수 초 걸릴 수 있다(1회성).
+  */
+static void BL_EnsureFactory(void)
+{
+  uint32_t factorySp = *(volatile uint32_t *)FACTORY_ADDRESS;
+  uint32_t appSp     = *(volatile uint32_t *)APP_ADDRESS;
+
+  /* Factory가 이미 유효(SP가 RAM 범위)하면 그대로 둔다 */
+  if (factorySp >= RAM_START && factorySp <= RAM_END)
+  {
     return;
   }
 
-  /* 적용 중 표시: 파랑 LED 켜기 (복사 동안 CPU는 잠깐 멈춰있을 수 있음) */
+  /* App이 유효하지 않으면 복사할 원본이 없다 */
+  if (appSp < RAM_START || appSp > RAM_END)
+  {
+    return;
+  }
+
+  /* 캡처 중 표시: 초록+파랑 켜기 */
+  HAL_GPIO_WritePin(LD1_GPIO_Port, LD1_Pin, GPIO_PIN_SET);
   HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_SET);
 
-  /* 1) 실행영역에서 필요한 만큼 지우기 */
-  if (FlashIf_EraseRange(APP_ADDRESS, APP_ADDRESS + size - 1U) != FLASH_IF_OK)
+  /* App 슬롯 전체 → Factory 복사 */
+  if (FlashIf_EraseRange(FACTORY_ADDRESS, FACTORY_END_ADDRESS) == FLASH_IF_OK)
   {
-    return;   /* 실패: 플래그 유지 → 다음 부팅 재시도 */
+    FlashIf_Write(FACTORY_ADDRESS, (const uint8_t *)APP_ADDRESS, APP_SIZE);
   }
 
-  /* 2) Staging → 실행영역 복사 (Staging은 메모리 매핑이라 포인터로 바로 읽힘) */
-  if (FlashIf_Write(APP_ADDRESS, (const uint8_t *)STAGING_ADDRESS, (size + 3U) & ~3U) != FLASH_IF_OK)
-  {
-    return;   /* 실패: 플래그 유지 → 다음 부팅 재시도 */
-  }
-
-  /* 3) 성공: 플래그 클리어 (한 번만 적용) */
-  FlashIf_ClearMeta();
-
+  HAL_GPIO_WritePin(LD1_GPIO_Port, LD1_Pin, GPIO_PIN_RESET);
   HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_RESET);
 }
 

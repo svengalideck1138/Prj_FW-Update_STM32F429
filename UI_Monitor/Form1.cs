@@ -21,8 +21,16 @@ namespace UI_Monitor
         // 앱 실행영역 시작 주소 (flash_if.h의 APP_ADDRESS와 일치)
         private const uint APP_BASE_ADDRESS = 0x08020000;
 
-        // 코드로 생성하는 "Send Firmware" 버튼
-        private Button _btnSendFirmware;
+        // [임시 테스트] true면 처음 몇 청크의 '첫 전송'에 일부러 틀린 CRC16을 보내 재전송을 유발.
+        // 청크별 checksum + 자동 재전송이 동작하는지 확인용. (검증 완료 → 평소엔 false)
+        private bool _debugCorruptFirstAttempt = false;
+
+        // Open으로 로드된 펌웨어 이미지 (Download 시 전송)
+        private byte[] _fwImage;
+
+        // 전송 진행률/속도(실시간 표출) 계산용
+        private int _txStartMs;
+        private int _lastLoggedDecile;
 
         public Form1()
         {
@@ -36,20 +44,12 @@ namespace UI_Monitor
             Btn_COMOPEN.Click += Btn_COMOPEN_Click;
             Btn_COMCLOSE.Click += Btn_COMCLOSE_Click;
             Btn_Clear_RS232Log.Click += (s, e) => Tbox_RS232_ReceivedLog.Clear();
-            Btn_READYFORUPDATE.Click += Btn_ReadyForUpdate_Click;   // "READY FOR UPDATE" 버튼
             _serial.DataReceived += Serial_DataReceived;
             FormClosing += (s, e) => { if (_serial.IsOpen) _serial.Close(); };
 
-            // "Send Firmware (.hex)" 버튼을 코드로 생성 (READY 버튼 오른쪽)
-            _btnSendFirmware = new Button
-            {
-                Name = "Btn_SendFirmware",
-                Text = "Send Firmware (.hex)",
-                Location = new Point(305, 12),
-                Size = new Size(150, 23)
-            };
-            _btnSendFirmware.Click += Btn_SendFirmware_Click;
-            Controls.Add(_btnSendFirmware);
+            // 펌웨어 업데이트 버튼 배선 (Designer 컨트롤)
+            Btn_FW_Open.Click += Btn_FW_Open_Click;
+            Btn_FW_Download.Click += Btn_FW_Download_Click;
 
             // COM 포트 목록 채우고 초기 버튼 상태 설정
             RefreshComPorts();
@@ -137,19 +137,6 @@ namespace UI_Monitor
             AppendLog("[CLOSE]\r\n");
         }
 
-        /// <summary>"READY FOR UPDATE" 버튼: MCU를 다운로드 모드로 보내는 명령어 전송.</summary>
-        private void Btn_ReadyForUpdate_Click(object sender, EventArgs e)
-        {
-            if (!_serial.IsOpen)
-            {
-                MessageBox.Show("먼저 COM 포트를 여세요 (OPEN).");
-                return;
-            }
-
-            _serial.Write("FWUPDATE");
-            AppendLog("[TX] FWUPDATE\r\n");
-        }
-
         /// <summary>데이터 수신(백그라운드 스레드) → 뷰어에 표시.</summary>
         private void Serial_DataReceived(object sender, SerialDataReceivedEventArgs e)
         {
@@ -183,43 +170,52 @@ namespace UI_Monitor
         //  펌웨어 전송 (.hex/.bin -> Staging)
         // ============================================================
 
-        /// <summary>Send Firmware 버튼: 파일 선택 → 파싱 → 프로토콜로 전송.</summary>
-        private async void Btn_SendFirmware_Click(object sender, EventArgs e)
+        /// <summary>Open 버튼: 파일 선택 → 파싱/로드 → 경로·크기 표시.</summary>
+        private void Btn_FW_Open_Click(object sender, EventArgs e)
         {
-            if (!_serial.IsOpen)
-            {
-                MessageBox.Show("먼저 COM 포트를 여세요 (OPEN).");
-                return;
-            }
-
-            string path;
             using (var dlg = new OpenFileDialog
             {
                 Filter = "펌웨어 (*.hex;*.bin)|*.hex;*.bin|Intel HEX (*.hex)|*.hex|Binary (*.bin)|*.bin|모든 파일 (*.*)|*.*"
             })
             {
                 if (dlg.ShowDialog() != DialogResult.OK) return;
-                path = dlg.FileName;
-            }
 
-            byte[] image;
-            try
-            {
-                image = path.EndsWith(".hex", StringComparison.OrdinalIgnoreCase)
-                    ? ParseIntelHex(path, APP_BASE_ADDRESS)
-                    : PadTo4(File.ReadAllBytes(path));
+                try
+                {
+                    _fwImage = dlg.FileName.EndsWith(".hex", StringComparison.OrdinalIgnoreCase)
+                        ? ParseIntelHex(dlg.FileName, APP_BASE_ADDRESS)
+                        : PadTo4(File.ReadAllBytes(dlg.FileName));
+
+                    textBox_FW_FIle.Text = dlg.FileName;                       // 선택된 파일 경로 표시
+                    label_FW_Size.Text = $"{_fwImage.Length:N0} Byte";  // 파싱된 이미지 크기 표시
+                    AppendLog($"[FW] {Path.GetFileName(dlg.FileName)} 로드: {_fwImage.Length} bytes\r\n");
+                }
+                catch (Exception ex)
+                {
+                    _fwImage = null;
+                    textBox_FW_FIle.Text = "";
+                    label_FW_Size.Text = "0 Byte";
+                    MessageBox.Show("펌웨어 파싱 실패: " + ex.Message);
+                }
             }
-            catch (Exception ex)
+        }
+
+        /// <summary>F/W Download 버튼: 로드된 펌웨어를 프로토콜로 전송.</summary>
+        private async void Btn_FW_Download_Click(object sender, EventArgs e)
+        {
+            if (!_serial.IsOpen)
             {
-                MessageBox.Show("펌웨어 파싱 실패: " + ex.Message);
+                MessageBox.Show("먼저 COM 포트를 여세요 (OPEN).");
+                return;
+            }
+            if (_fwImage == null)
+            {
+                MessageBox.Show("먼저 Open으로 펌웨어 파일을 선택하세요.");
                 return;
             }
 
-            AppendLog($"[FW] {Path.GetFileName(path)} 로드: {image.Length} bytes\r\n");
             SetTransferUi(true);
-
-            bool ok = await Task.Run(() => SendFirmwareSequence(image));
-
+            bool ok = await Task.Run(() => SendFirmwareSequence(_fwImage));
             SetTransferUi(false);
             MessageBox.Show(ok ? "펌웨어 전송 완료! (Staging에 저장됨)" : "펌웨어 전송 실패 — 로그를 확인하세요.");
         }
@@ -227,7 +223,7 @@ namespace UI_Monitor
         /// <summary>프로토콜에 따라 펌웨어를 전송한다 (백그라운드 스레드).</summary>
         private bool SendFirmwareSequence(byte[] image)
         {
-            const byte ACK = 0x79;
+            const byte ACK = 0x79, NACK = 0x1F;
             const int CHUNK = 256;
 
             _serial.DataReceived -= Serial_DataReceived;   // 동기 읽기를 위해 이벤트 분리
@@ -250,35 +246,77 @@ namespace UI_Monitor
                 _serial.DiscardInBuffer();                 // "READY\r\n"의 \r\n 제거
                 AppendLog("[RX] READY\r\n");
 
-                // 3) 전체 크기 4바이트 (little-endian)
-                _serial.Write(BitConverter.GetBytes((uint)image.Length), 0, 4);
+                // 3) 헤더 전송: [전체크기 4B][CRC32 4B] (little-endian)
+                uint crc = Crc32Stm32(image);
+                var header = new byte[8];
+                BitConverter.GetBytes((uint)image.Length).CopyTo(header, 0);
+                BitConverter.GetBytes(crc).CopyTo(header, 4);
+                _serial.Write(header, 0, 8);
+                AppendLog($"[TX] size={image.Length}, CRC32=0x{crc:X8}\r\n");
 
                 // 4) Staging erase 후 ACK
                 int b = _serial.ReadByte();
                 if (b != ACK) { AppendLog($"[ERR] erase ACK 실패 (0x{b:X2})\r\n"); return false; }
                 AppendLog($"[RX] ACK — 전송 시작 ({image.Length} bytes)\r\n");
 
-                // 5) 256B 청크 전송 (청크마다 ACK 대기)
+                _txStartMs = Environment.TickCount;   // 실시간 속도 계산 기준 시각
+                _lastLoggedDecile = -1;
+
+                // 5) 청크 전송 — 각 청크: [데이터][CRC16 2B]. NACK면 같은 청크 재전송.
                 int sent = 0;
+                int totalRetries = 0;
                 while (sent < image.Length)
                 {
                     int n = Math.Min(CHUNK, image.Length - sent);
-                    _serial.Write(image, sent, n);
+                    ushort chunkCrc = Crc16Ccitt(image, sent, n);
+                    var crcBytes = new byte[] { (byte)(chunkCrc & 0xFF), (byte)(chunkCrc >> 8) };
 
-                    int ack = _serial.ReadByte();
-                    if (ack != ACK)
+                    int retries = 0;
+                    while (true)
                     {
-                        AppendLog($"[ERR] 청크 ACK 실패 (0x{ack:X2}) @ offset {sent}\r\n");
+                        _serial.Write(image, sent, n);      // 데이터
+
+                        // [임시 테스트] 처음 3개 청크(offset 0/256/512)의 첫 시도에만 CRC를 깨서 재전송 유발
+                        byte[] txCrc = crcBytes;
+                        if (_debugCorruptFirstAttempt && retries == 0 &&
+                            (sent == 0 || sent == 256 || sent == 512))
+                        {
+                            txCrc = new byte[] { (byte)(crcBytes[0] ^ 0xFF), crcBytes[1] };
+                        }
+                        _serial.Write(txCrc, 0, 2);         // CRC16 (little-endian)
+
+                        int resp = _serial.ReadByte();
+                        if (resp == ACK) break;             // 확정 → 다음 청크
+                        if (resp == NACK)
+                        {
+                            if (++retries > 5)
+                            {
+                                AppendLog($"[ERR] 청크 재시도 초과 @ offset {sent}\r\n");
+                                return false;
+                            }
+                            totalRetries++;
+                            AppendLog($"[!] 청크 CRC 불일치 → 재전송 @ {sent} (retry {retries})\r\n");
+                            continue;                       // 같은 청크 재전송
+                        }
+                        AppendLog($"[ERR] 예상치 못한 응답 0x{resp:X2} @ offset {sent}\r\n");
                         return false;
                     }
 
                     sent += n;
                     UpdateProgress(sent, image.Length);
                 }
+                if (totalRetries > 0) AppendLog($"[i] 청크 재전송 총 {totalRetries}회 (자동 복구됨)\r\n");
 
-                // 6) DONE 대기
-                if (!WaitForText("DONE", 3000)) { AppendLog("[ERR] DONE 응답 없음\r\n"); return false; }
-                AppendLog("[RX] DONE — 전송 완료\r\n");
+                // 6) MCU가 Staging CRC를 검증한 결과 대기 (DONE 또는 CRCERR)
+                string res = WaitForAnyText(new[] { "DONE", "CRCERR" }, 5000);
+                if (res == "CRCERR")
+                {
+                    AppendLog("[ERR] CRC 불일치 — 전송이 손상됨 (적용되지 않음)\r\n");
+                    return false;
+                }
+                if (res != "DONE") { AppendLog("[ERR] 완료 응답 없음\r\n"); return false; }
+
+                AppendLog("[RX] DONE — CRC 검증 통과, 보드가 재부팅되어 적용됩니다\r\n");
                 return true;
             }
             catch (TimeoutException) { AppendLog("[ERR] 타임아웃\r\n"); return false; }
@@ -307,6 +345,55 @@ namespace UI_Monitor
             finally { _serial.ReadTimeout = old; }
         }
 
+        /// <summary>여러 target 중 하나가 나올 때까지 동기 수신. 매칭된 문자열 반환(타임아웃 시 null).</summary>
+        private string WaitForAnyText(string[] targets, int timeoutMs)
+        {
+            int old = _serial.ReadTimeout;
+            _serial.ReadTimeout = timeoutMs;
+            var sb = new StringBuilder();
+            try
+            {
+                while (true)
+                {
+                    sb.Append((char)_serial.ReadByte());
+                    string s = sb.ToString();
+                    foreach (string t in targets)
+                        if (s.Contains(t)) return t;
+                }
+            }
+            catch (TimeoutException) { return null; }
+            finally { _serial.ReadTimeout = old; }
+        }
+
+        /// <summary>
+        /// STM32 하드웨어 CRC 유닛과 동일한 CRC32를 계산한다.
+        /// poly=0x04C11DB7, init=0xFFFFFFFF, 32bit word 단위, 반사 없음, 최종 XOR 없음.
+        /// </summary>
+        private static uint Crc32Stm32(byte[] data)
+        {
+            uint crc = 0xFFFFFFFF;
+            for (int i = 0; i + 4 <= data.Length; i += 4)
+            {
+                crc ^= BitConverter.ToUInt32(data, i);   // little-endian으로 word 구성
+                for (int bit = 0; bit < 32; bit++)
+                    crc = (crc & 0x80000000) != 0 ? (crc << 1) ^ 0x04C11DB7 : (crc << 1);
+            }
+            return crc;
+        }
+
+        /// <summary>CRC16-CCITT (poly=0x1021, init=0xFFFF, 반사 없음) — 청크 무결성 검사용.</summary>
+        private static ushort Crc16Ccitt(byte[] data, int offset, int len)
+        {
+            ushort crc = 0xFFFF;
+            for (int i = 0; i < len; i++)
+            {
+                crc ^= (ushort)(data[offset + i] << 8);
+                for (int b = 0; b < 8; b++)
+                    crc = (crc & 0x8000) != 0 ? (ushort)((crc << 1) ^ 0x1021) : (ushort)(crc << 1);
+            }
+            return crc;
+        }
+
         /// <summary>진행률을 상태바에 표시 (UI 스레드).</summary>
         private void UpdateProgress(int sent, int total)
         {
@@ -316,18 +403,32 @@ namespace UI_Monitor
                 return;
             }
             int pct = total > 0 ? (int)((long)sent * 100 / total) : 0;
+
+            // 경과 시간 → 전송 속도(KB/s) 계산
+            int elapsedMs = Math.Max(1, Environment.TickCount - _txStartMs);
+            double kbps = (sent / 1024.0) / (elapsedMs / 1000.0);
+
+            // 상태바: 진행률 바 + % + 바이트/속도 (실시간)
             TStripProBar_SendState.Maximum = 100;
             TStripProBar_SendState.Value = pct;
             TSStatusLb_Percent.Text = $"{pct}%";
-            TSStatusLb_nCounter.Text = $"{sent}/{total} bytes";
+            TSStatusLb_nCounter.Text = $"{sent:N0}/{total:N0} B   {kbps:F1} KB/s";
+
+            // 로그: 10%마다 한 줄(흐름을 뷰어에서도 볼 수 있게, 과도한 스팸 방지)
+            int decile = pct / 10;
+            if (decile != _lastLoggedDecile)
+            {
+                _lastLoggedDecile = decile;
+                AppendLog($"[전송] {pct,3}%  {sent:N0}/{total:N0} bytes  {kbps:F1} KB/s\r\n");
+            }
         }
 
         /// <summary>전송 중 UI 잠금/해제.</summary>
         private void SetTransferUi(bool active)
         {
             if (InvokeRequired) { BeginInvoke(new Action(() => SetTransferUi(active))); return; }
-            _btnSendFirmware.Enabled = !active;
-            Btn_READYFORUPDATE.Enabled = !active;
+            Btn_FW_Open.Enabled = !active;
+            Btn_FW_Download.Enabled = !active;
             Btn_COMOPEN.Enabled = !active && !_serial.IsOpen;
             Btn_COMCLOSE.Enabled = !active && _serial.IsOpen;
             if (!active) TStripProBar_SendState.Value = 0;

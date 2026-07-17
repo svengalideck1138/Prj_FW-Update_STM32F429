@@ -48,15 +48,16 @@ _Min_Stack_Size = 0x400; /* required amount of stack */
  * 메모리 맵 (flash_if.h와 일치):
  *   Bootloader   0x0800_0000  64KB    (섹터 0~3)
  *   Metadata     0x0801_0000  64KB    (섹터 4)
- *   App 실행영역  0x0802_0000  896KB   (섹터 5~11)  <- 이 프로젝트
- *   Staging      0x0810_0000  896KB   (섹터 12~22)
+ *   App 실행영역  0x0802_0000  512KB   (섹터 5~8)   <- 이 프로젝트
+ *   Factory      0x080A_0000  512KB   (섹터 9~16)
+ *   Staging      0x0812_0000  512KB   (섹터 17~20)
  * ORIGIN을 바꿨으니 앱 main()에서 SCB->VTOR = 0x08020000 설정 필수!
  */
 MEMORY
 {
   CCMRAM    (xrw)    : ORIGIN = 0x10000000,   LENGTH = 64K
   RAM    (xrw)    : ORIGIN = 0x20000000,   LENGTH = 192K
-  FLASH    (rx)    : ORIGIN = 0x8020000,   LENGTH = 896K
+  FLASH    (rx)    : ORIGIN = 0x8020000,   LENGTH = 512K
 }
 
 /* Sections */

@@ -48,6 +48,8 @@ ETH_DMADescTypeDef  DMATxDscrTab[ETH_TX_DESC_CNT]; /* Ethernet Tx DMA Descriptor
 
 ETH_HandleTypeDef heth;
 
+IWDG_HandleTypeDef hiwdg;
+
 UART_HandleTypeDef huart3;
 
 PCD_HandleTypeDef hpcd_USB_OTG_FS;
@@ -62,8 +64,10 @@ static void MX_GPIO_Init(void);
 static void MX_ETH_Init(void);
 static void MX_USART3_UART_Init(void);
 static void MX_USB_OTG_FS_PCD_Init(void);
+static void MX_IWDG_Init(void);
 /* USER CODE BEGIN PFP */
 static void App_EnterDownloadMode(void);
+static uint16_t App_Crc16(const uint8_t *data, uint32_t len);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -105,13 +109,25 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
-  /* [앱 경량화] 아래 3개는 앱에 불필요(부트로더 몫)하고, 여기서 초기화가 멈추면
-   * LED 루프에 도달하지 못한다. 점프 검증을 위해 호출을 막아둔다.
-   * (영구 반영하려면 CubeMX .ioc에서 ETH/USB/USART3을 Disable 후 재생성) */
-  // MX_ETH_Init();
-  MX_USART3_UART_Init();   /* [4단계] 앱이 UART로 업데이트 명령/펌웨어 수신 */
-  // MX_USB_OTG_FS_PCD_Init();
+  MX_ETH_Init();
+  MX_USART3_UART_Init();
+  MX_USB_OTG_FS_PCD_Init();
+  MX_IWDG_Init();
   /* USER CODE BEGIN 2 */
+
+  /* 시험 부팅(TRIAL) 중이면 자가진단 후 '정상 확인(CONFIRMED)'을 기록한다.
+   * 여기까지 도달 = 앱이 부팅·초기화에 성공했다는 뜻. (실제 제품은 센서/통신 점검 후 확인)
+   * CONFIRMED를 못 남기고 앱이 멈추면 → 워치독이 리셋 → 부트로더가 Factory로 롤백. */
+  {
+    const FwMeta *m = (const FwMeta *)METADATA_ADDRESS;
+    if (m->magic == FW_UPDATE_MAGIC && m->state == FW_STATE_TRIAL)
+    {
+      IWDG->KR = 0x0000AAAAU;        /* 플래시 쓰기 전에 워치독 갱신(여유 확보) */
+      FwMeta meta = *m;
+      meta.state = FW_STATE_CONFIRMED;
+      FlashIf_WriteMeta(&meta);
+    }
+  }
 
   /* USER CODE END 2 */
 
@@ -122,6 +138,10 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+
+    /* 워치독 갱신(pet): TRIAL 부팅 시 부트로더가 IWDG를 켜둔다. 이 루프가 계속 돌면
+     * 리셋 안 됨. 앱이 멈추면 갱신이 끊겨 리셋 → 롤백. (IWDG 미가동 시엔 무해한 no-op) */
+    IWDG->KR = 0x0000AAAAU;
 
     /* === 앱 정상 모드 ===
      * · LD1(초록)을 0.5초마다 토글 = 앱 정상 실행 중(하트비트)
@@ -154,7 +174,7 @@ int main(void)
     /* 하트비트: 0.5초마다 초록 LED 토글 */
     if ((HAL_GetTick() - lastBlink) >= 100U)
     {
-      HAL_GPIO_TogglePin(LD2_GPIO_Port, LD2_Pin);
+      HAL_GPIO_TogglePin(LD1_GPIO_Port, LD1_Pin);
       lastBlink = HAL_GetTick();
     }
   }
@@ -178,8 +198,9 @@ void SystemClock_Config(void)
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_LSI|RCC_OSCILLATORTYPE_HSE;
   RCC_OscInitStruct.HSEState = RCC_HSE_BYPASS;
+  RCC_OscInitStruct.LSIState = RCC_LSI_ON;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
   RCC_OscInitStruct.PLL.PLLM = 4;
@@ -252,6 +273,34 @@ static void MX_ETH_Init(void)
   /* USER CODE BEGIN ETH_Init 2 */
 
   /* USER CODE END ETH_Init 2 */
+
+}
+
+/**
+  * @brief IWDG Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_IWDG_Init(void)
+{
+
+  /* USER CODE BEGIN IWDG_Init 0 */
+
+  /* USER CODE END IWDG_Init 0 */
+
+  /* USER CODE BEGIN IWDG_Init 1 */
+
+  /* USER CODE END IWDG_Init 1 */
+  hiwdg.Instance = IWDG;
+  hiwdg.Init.Prescaler = IWDG_PRESCALER_256;
+  hiwdg.Init.Reload = 500;
+  if (HAL_IWDG_Init(&hiwdg) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN IWDG_Init 2 */
+
+  /* USER CODE END IWDG_Init 2 */
 
 }
 
@@ -383,6 +432,24 @@ static void MX_GPIO_Init(void)
 /* USER CODE BEGIN 4 */
 
 /**
+  * @brief  CRC16-CCITT (poly=0x1021, init=0xFFFF, 반사 없음). 청크 무결성 검사용.
+  * @note   PC(C#) 측 Crc16Ccitt 와 동일 파라미터여야 값이 일치한다.
+  */
+static uint16_t App_Crc16(const uint8_t *data, uint32_t len)
+{
+  uint16_t crc = 0xFFFFU;
+  for (uint32_t i = 0U; i < len; i++)
+  {
+    crc ^= (uint16_t)((uint16_t)data[i] << 8);
+    for (uint8_t b = 0U; b < 8U; b++)
+    {
+      crc = (crc & 0x8000U) ? (uint16_t)((crc << 1) ^ 0x1021U) : (uint16_t)(crc << 1);
+    }
+  }
+  return crc;
+}
+
+/**
   * @brief  "FWUPDATE" 명령 수신 시 진입하는 다운로드 모드. [4b 단계]
   * @note   프로토콜:
   *           PC → "READY" 응답을 보고 [전체크기 4B, LE] 전송
@@ -393,23 +460,28 @@ static void MX_GPIO_Init(void)
   */
 static void App_EnterDownloadMode(void)
 {
-  const char ready[] = "READY\r\n";
-  const char done[]  = "DONE\r\n";
+  const char ready[]  = "READY\r\n";
+  const char done[]   = "DONE\r\n";
+  const char crcerr[] = "CRCERR\r\n";
   uint8_t  ack = 0x79U, nack = 0x1FU;
   uint8_t  buf[256];
-  uint8_t  sizeBytes[4];
-  uint32_t total, addr, remaining;
+  uint8_t  hdr[8];
+  uint32_t total, expectCrc, addr, remaining;
 
   HAL_GPIO_WritePin(LD1_GPIO_Port, LD1_Pin, GPIO_PIN_RESET);   /* 초록 끔 */
   HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_SET);     /* 파랑: 다운로드 모드 */
   HAL_UART_Transmit(&huart3, (uint8_t *)ready, sizeof(ready) - 1U, HAL_MAX_DELAY);
 
-  /* 1) 전체 크기(4바이트, little-endian) 수신 */
-  if (HAL_UART_Receive(&huart3, sizeBytes, 4U, HAL_MAX_DELAY) != HAL_OK) goto stop;
-  total = (uint32_t)sizeBytes[0]
-        | ((uint32_t)sizeBytes[1] << 8)
-        | ((uint32_t)sizeBytes[2] << 16)
-        | ((uint32_t)sizeBytes[3] << 24);
+  /* 1) 헤더 수신: [전체크기 4B][CRC32 4B] (little-endian) */
+  if (HAL_UART_Receive(&huart3, hdr, 8U, HAL_MAX_DELAY) != HAL_OK) goto stop;
+  total = (uint32_t)hdr[0]
+        | ((uint32_t)hdr[1] << 8)
+        | ((uint32_t)hdr[2] << 16)
+        | ((uint32_t)hdr[3] << 24);
+  expectCrc = (uint32_t)hdr[4]
+            | ((uint32_t)hdr[5] << 8)
+            | ((uint32_t)hdr[6] << 16)
+            | ((uint32_t)hdr[7] << 24);
 
   /* 크기 유효성 검사 */
   if ((total == 0U) || (total > STAGING_SIZE))
@@ -419,6 +491,7 @@ static void App_EnterDownloadMode(void)
   }
 
   /* 2) Staging 영역에서 필요한 만큼 지우기 */
+  IWDG->KR = 0x0000AAAAU;   /* 지우기 직전 워치독 갱신 (큰 erase가 타임아웃 넘기지 않도록) */
   if (FlashIf_EraseRange(STAGING_ADDRESS, STAGING_ADDRESS + total - 1U) != FLASH_IF_OK)
   {
     HAL_UART_Transmit(&huart3, &nack, 1U, HAL_MAX_DELAY);
@@ -426,40 +499,68 @@ static void App_EnterDownloadMode(void)
   }
   HAL_UART_Transmit(&huart3, &ack, 1U, HAL_MAX_DELAY);   /* 지우기 완료 ACK */
 
-  /* 3) 청크 수신 → Staging 기록 (청크마다 ACK) */
+  /* 3) 청크 수신 → CRC16 검증 → Staging 기록.
+   *    각 청크: [데이터 n바이트][CRC16 2바이트, LE]
+   *    CRC 불일치 → NACK (PC가 같은 청크 재전송) / 정상 → 기록 후 ACK */
   addr = STAGING_ADDRESS;
   remaining = total;
   while (remaining > 0U)
   {
     uint32_t n = (remaining > sizeof(buf)) ? sizeof(buf) : remaining;
+    uint8_t  crcBuf[2];
+    uint8_t  retries = 0U;
 
-    if (HAL_UART_Receive(&huart3, buf, (uint16_t)n, HAL_MAX_DELAY) != HAL_OK) goto stop;
+    IWDG->KR = 0x0000AAAAU;   /* 청크마다 워치독 갱신 (긴 전송 중 리셋 방지) */
 
-    /* Flash는 4바이트 단위 → 꼬리는 0xFF로 패딩 */
+    /* 이 청크가 CRC를 통과할 때까지 재수신 */
+    for (;;)
+    {
+      if (HAL_UART_Receive(&huart3, buf, (uint16_t)n, HAL_MAX_DELAY) != HAL_OK) goto stop;
+      if (HAL_UART_Receive(&huart3, crcBuf, 2U, HAL_MAX_DELAY) != HAL_OK) goto stop;
+
+      uint16_t rxCrc = (uint16_t)crcBuf[0] | ((uint16_t)crcBuf[1] << 8);
+      if (App_Crc16(buf, n) == rxCrc)
+      {
+        break;   /* 데이터 정상 → 기록으로 진행 */
+      }
+
+      /* 깨짐 → NACK, PC가 같은 청크를 재전송한다 */
+      HAL_UART_Transmit(&huart3, &nack, 1U, HAL_MAX_DELAY);
+      if (++retries >= 5U) goto stop;   /* 같은 청크 5회 실패 → 포기 */
+    }
+
+    /* Flash는 4바이트 단위 → 꼬리는 0xFF로 패딩 후 기록 */
     uint32_t nAligned = (n + 3U) & ~3U;
     for (uint32_t i = n; i < nAligned; i++) buf[i] = 0xFFU;
-
     if (FlashIf_Write(addr, buf, nAligned) != FLASH_IF_OK)
     {
       HAL_UART_Transmit(&huart3, &nack, 1U, HAL_MAX_DELAY);
       goto stop;
     }
-    HAL_UART_Transmit(&huart3, &ack, 1U, HAL_MAX_DELAY);   /* 청크 ACK */
+    HAL_UART_Transmit(&huart3, &ack, 1U, HAL_MAX_DELAY);   /* 청크 확정 ACK */
 
     addr += n;
     remaining -= n;
     HAL_GPIO_TogglePin(LD3_GPIO_Port, LD3_Pin);            /* 진행 표시 */
   }
 
-  /* 4) 완료 응답 */
+  /* 4) 수신 완료 → Staging 전체 CRC 검증 (깨진 전송 차단) */
+  if (FlashIf_Crc32((const uint8_t *)STAGING_ADDRESS, total) != expectCrc)
+  {
+    /* 불일치 → 플래그를 남기지 않는다. 깨진 펌웨어는 절대 적용되지 않음. */
+    HAL_UART_Transmit(&huart3, (uint8_t *)crcerr, sizeof(crcerr) - 1U, HAL_MAX_DELAY);
+    goto stop;
+  }
   HAL_UART_Transmit(&huart3, (uint8_t *)done, sizeof(done) - 1U, HAL_MAX_DELAY);
 
   /* 5) '업데이트 대기' 플래그(메타데이터) 기록 후 재부팅 → 부트로더가 적용 */
   {
     FwMeta meta;
     meta.magic    = FW_UPDATE_MAGIC;
+    meta.state    = FW_STATE_PENDING;   /* 부트로더에게 '적용 예정'을 알림 */
     meta.size     = total;
-    meta.crc      = 0U;
+    meta.crc      = expectCrc;          /* 부트로더가 복사 전/후 검증에 사용 */
+    meta.attempts = 0U;
     meta.reserved = 0U;
     FlashIf_WriteMeta(&meta);
   }

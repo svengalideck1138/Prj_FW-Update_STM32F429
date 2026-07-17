@@ -108,3 +108,21 @@ FlashIf_Status FlashIf_ClearMeta(void)
 {
   return FlashIf_EraseRange(METADATA_ADDRESS, METADATA_ADDRESS);
 }
+
+uint32_t FlashIf_Crc32(const uint8_t *data, uint32_t length)
+{
+  /* STM32 하드웨어 CRC 유닛:
+   *   DR에 32bit word를 쓸 때마다  crc ^= word; 이후 32회 { crc = (crc<<1) ^ (MSB? poly:0) }
+   *   CR의 RESET 비트로 init=0xFFFFFFFF */
+  __HAL_RCC_CRC_CLK_ENABLE();
+  CRC->CR = CRC_CR_RESET;
+
+  for (uint32_t i = 0U; (i + 4U) <= length; i += 4U)
+  {
+    uint32_t word;
+    memcpy(&word, &data[i], 4U);   /* 비정렬 접근 회피 (little-endian으로 word 구성) */
+    CRC->DR = word;
+  }
+
+  return CRC->DR;
+}
