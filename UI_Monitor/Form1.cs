@@ -18,6 +18,10 @@ namespace UI_Monitor
         // RS-232 통신용 시리얼 포트
         private readonly SerialPort _serial = new SerialPort();
 
+        // 전송 링크 추상화: 시리얼 래퍼(항상 존재) + TCP 링크(연결 시에만)
+        private SerialLink _serialLink;
+        private TcpLink _tcp;
+
         // 앱 실행영역 시작 주소 (flash_if.h의 APP_ADDRESS와 일치)
         private const uint APP_BASE_ADDRESS = 0x08020000;
 
@@ -45,15 +49,26 @@ namespace UI_Monitor
             Btn_COMCLOSE.Click += Btn_COMCLOSE_Click;
             Btn_Clear_RS232Log.Click += (s, e) => Tbox_RS232_ReceivedLog.Clear();
             _serial.DataReceived += Serial_DataReceived;
-            FormClosing += (s, e) => { if (_serial.IsOpen) _serial.Close(); };
+            _serialLink = new SerialLink(_serial, Serial_DataReceived);   // 프로토콜용 시리얼 래퍼
+            FormClosing += (s, e) =>
+            {
+                if (_serial.IsOpen) _serial.Close();
+                _tcp?.Dispose();
+            };
 
             // 펌웨어 업데이트 버튼 배선 (Designer 컨트롤)
             Btn_FW_Open.Click += Btn_FW_Open_Click;
             Btn_FW_Download.Click += Btn_FW_Download_Click;
 
+            // --- 소켓(Ethernet) 관련 이벤트 연결 ---
+            Btn_SOCKETConnect.Click += Btn_SOCKETConnect_Click;
+            Btn_SOCKETDisconnect.Click += Btn_SOCKETDisconnect_Click;
+            Btn_Clear_EthernetLog.Click += (s, e) => Tbox_Ethernet_ReceivedLog.Clear();
+
             // COM 포트 목록 채우고 초기 버튼 상태 설정
             RefreshComPorts();
             UpdateConnState(false);
+            UpdateSocketConnState(false);
         }
 
         /// <summary>
@@ -148,15 +163,14 @@ namespace UI_Monitor
             catch { /* 포트가 닫히는 중이면 무시 */ }
         }
 
-        /// <summary>수신 로그 텍스트박스에 안전하게(UI 스레드) 문자열을 덧붙인다.</summary>
+        /// <summary>수신/진행 로그를 현재 전송 모드의 뷰어(RS-232 또는 Ethernet)에 안전하게 덧붙인다.</summary>
         private void AppendLog(string text)
         {
-            if (Tbox_RS232_ReceivedLog.IsDisposed) return;
+            if (IsDisposed) return;
+            if (InvokeRequired) { BeginInvoke(new Action(() => AppendLog(text))); return; }
 
-            if (Tbox_RS232_ReceivedLog.InvokeRequired)
-                Tbox_RS232_ReceivedLog.BeginInvoke(new Action(() => AppendLog(text)));
-            else
-                Tbox_RS232_ReceivedLog.AppendText(text);
+            var box = RBtn_TransMode_Ethernet.Checked ? Tbox_Ethernet_ReceivedLog : Tbox_RS232_ReceivedLog;
+            if (!box.IsDisposed) box.AppendText(text);
         }
 
         /// <summary>연결 상태에 따라 OPEN/CLOSE 버튼 활성화를 갱신한다.</summary>
@@ -200,14 +214,31 @@ namespace UI_Monitor
             }
         }
 
-        /// <summary>F/W Download 버튼: 로드된 펌웨어를 프로토콜로 전송.</summary>
+        /// <summary>F/W Download 버튼: 현재 모드(RS-232/Ethernet)에 맞는 링크로 펌웨어를 전송.</summary>
         private async void Btn_FW_Download_Click(object sender, EventArgs e)
         {
-            if (!_serial.IsOpen)
+            bool eth = RBtn_TransMode_Ethernet.Checked;
+
+            IFwLink link;
+            if (eth)
             {
-                MessageBox.Show("먼저 COM 포트를 여세요 (OPEN).");
-                return;
+                if (_tcp == null || !_tcp.IsConnected)
+                {
+                    MessageBox.Show("먼저 Socket Connect로 보드에 연결하세요.");
+                    return;
+                }
+                link = _tcp;
             }
+            else
+            {
+                if (!_serial.IsOpen)
+                {
+                    MessageBox.Show("먼저 COM 포트를 여세요 (OPEN).");
+                    return;
+                }
+                link = _serialLink;
+            }
+
             if (_fwImage == null)
             {
                 MessageBox.Show("먼저 Open으로 펌웨어 파일을 선택하세요.");
@@ -215,35 +246,45 @@ namespace UI_Monitor
             }
 
             SetTransferUi(true);
-            bool ok = await Task.Run(() => SendFirmwareSequence(_fwImage));
+            bool ok = await Task.Run(() => SendFirmwareSequence(_fwImage, link));
             SetTransferUi(false);
+
+            // Ethernet: 전송 후 보드가 재부팅(성공) 또는 정지(실패)하므로 연결이 유효하지 않다 → 정리.
+            if (eth)
+            {
+                _tcp?.Dispose();
+                _tcp = null;
+                UpdateSocketConnState(false);
+                if (ok) AppendLog("[i] 보드 재부팅 중 — 다시 전송하려면 재접속(Connect) 하세요.\r\n");
+            }
+
             MessageBox.Show(ok ? "펌웨어 전송 완료! (Staging에 저장됨)" : "펌웨어 전송 실패 — 로그를 확인하세요.");
         }
 
-        /// <summary>프로토콜에 따라 펌웨어를 전송한다 (백그라운드 스레드).</summary>
-        private bool SendFirmwareSequence(byte[] image)
+        /// <summary>프로토콜에 따라 펌웨어를 전송한다 (백그라운드 스레드). 전송 계층은 link로 추상화.</summary>
+        private bool SendFirmwareSequence(byte[] image, IFwLink link)
         {
             const byte ACK = 0x79, NACK = 0x1F;
             const int CHUNK = 256;
 
-            _serial.DataReceived -= Serial_DataReceived;   // 동기 읽기를 위해 이벤트 분리
+            link.PauseAsyncRx();                           // 동기 읽기를 위해 비동기 수신 중지
             try
             {
-                _serial.ReadTimeout = 10000;               // erase가 오래 걸릴 수 있어 넉넉히
-                _serial.DiscardInBuffer();
+                link.ReadTimeout = 10000;                  // erase가 오래 걸릴 수 있어 넉넉히
+                link.DiscardInBuffer();
 
                 // 1) FWUPDATE 전송
-                _serial.Write("FWUPDATE");
+                link.Write("FWUPDATE");
                 AppendLog("[TX] FWUPDATE\r\n");
 
                 // 2) READY 대기
-                if (!WaitForText("READY", 3000))
+                if (!WaitForText("READY", 3000, link))
                 {
                     AppendLog("[ERR] READY 응답 없음 (보드가 초록 하트비트 상태인지 확인)\r\n");
                     return false;
                 }
                 Thread.Sleep(30);
-                _serial.DiscardInBuffer();                 // "READY\r\n"의 \r\n 제거
+                link.DiscardInBuffer();                    // "READY\r\n"의 \r\n 제거
                 AppendLog("[RX] READY\r\n");
 
                 // 3) 헤더 전송: [전체크기 4B][CRC32 4B] (little-endian)
@@ -251,11 +292,11 @@ namespace UI_Monitor
                 var header = new byte[8];
                 BitConverter.GetBytes((uint)image.Length).CopyTo(header, 0);
                 BitConverter.GetBytes(crc).CopyTo(header, 4);
-                _serial.Write(header, 0, 8);
+                link.Write(header, 0, 8);
                 AppendLog($"[TX] size={image.Length}, CRC32=0x{crc:X8}\r\n");
 
                 // 4) Staging erase 후 ACK
-                int b = _serial.ReadByte();
+                int b = link.ReadByte();
                 if (b != ACK) { AppendLog($"[ERR] erase ACK 실패 (0x{b:X2})\r\n"); return false; }
                 AppendLog($"[RX] ACK — 전송 시작 ({image.Length} bytes)\r\n");
 
@@ -274,7 +315,7 @@ namespace UI_Monitor
                     int retries = 0;
                     while (true)
                     {
-                        _serial.Write(image, sent, n);      // 데이터
+                        link.Write(image, sent, n);         // 데이터
 
                         // [임시 테스트] 처음 3개 청크(offset 0/256/512)의 첫 시도에만 CRC를 깨서 재전송 유발
                         byte[] txCrc = crcBytes;
@@ -283,9 +324,9 @@ namespace UI_Monitor
                         {
                             txCrc = new byte[] { (byte)(crcBytes[0] ^ 0xFF), crcBytes[1] };
                         }
-                        _serial.Write(txCrc, 0, 2);         // CRC16 (little-endian)
+                        link.Write(txCrc, 0, 2);            // CRC16 (little-endian)
 
-                        int resp = _serial.ReadByte();
+                        int resp = link.ReadByte();
                         if (resp == ACK) break;             // 확정 → 다음 청크
                         if (resp == NACK)
                         {
@@ -308,7 +349,7 @@ namespace UI_Monitor
                 if (totalRetries > 0) AppendLog($"[i] 청크 재전송 총 {totalRetries}회 (자동 복구됨)\r\n");
 
                 // 6) MCU가 Staging CRC를 검증한 결과 대기 (DONE 또는 CRCERR)
-                string res = WaitForAnyText(new[] { "DONE", "CRCERR" }, 5000);
+                string res = WaitForAnyText(new[] { "DONE", "CRCERR" }, 5000, link);
                 if (res == "CRCERR")
                 {
                     AppendLog("[ERR] CRC 불일치 — 전송이 손상됨 (적용되지 않음)\r\n");
@@ -323,46 +364,46 @@ namespace UI_Monitor
             catch (Exception ex) { AppendLog("[ERR] " + ex.Message + "\r\n"); return false; }
             finally
             {
-                _serial.DataReceived += Serial_DataReceived;   // 이벤트 복원
+                link.ResumeAsyncRx();   // 비동기 수신 복원(TCP는 no-op)
             }
         }
 
         /// <summary>target 문자열이 나올 때까지 동기 수신 (timeout 초과 시 false).</summary>
-        private bool WaitForText(string target, int timeoutMs)
+        private bool WaitForText(string target, int timeoutMs, IFwLink link)
         {
-            int old = _serial.ReadTimeout;
-            _serial.ReadTimeout = timeoutMs;
+            int old = link.ReadTimeout;
+            link.ReadTimeout = timeoutMs;
             var sb = new StringBuilder();
             try
             {
                 while (true)
                 {
-                    sb.Append((char)_serial.ReadByte());
+                    sb.Append((char)link.ReadByte());
                     if (sb.ToString().Contains(target)) return true;
                 }
             }
             catch (TimeoutException) { return false; }
-            finally { _serial.ReadTimeout = old; }
+            finally { link.ReadTimeout = old; }
         }
 
         /// <summary>여러 target 중 하나가 나올 때까지 동기 수신. 매칭된 문자열 반환(타임아웃 시 null).</summary>
-        private string WaitForAnyText(string[] targets, int timeoutMs)
+        private string WaitForAnyText(string[] targets, int timeoutMs, IFwLink link)
         {
-            int old = _serial.ReadTimeout;
-            _serial.ReadTimeout = timeoutMs;
+            int old = link.ReadTimeout;
+            link.ReadTimeout = timeoutMs;
             var sb = new StringBuilder();
             try
             {
                 while (true)
                 {
-                    sb.Append((char)_serial.ReadByte());
+                    sb.Append((char)link.ReadByte());
                     string s = sb.ToString();
                     foreach (string t in targets)
                         if (s.Contains(t)) return t;
                 }
             }
             catch (TimeoutException) { return null; }
-            finally { _serial.ReadTimeout = old; }
+            finally { link.ReadTimeout = old; }
         }
 
         /// <summary>
@@ -431,7 +472,62 @@ namespace UI_Monitor
             Btn_FW_Download.Enabled = !active;
             Btn_COMOPEN.Enabled = !active && !_serial.IsOpen;
             Btn_COMCLOSE.Enabled = !active && _serial.IsOpen;
+
+            bool tcpConn = _tcp != null && _tcp.IsConnected;
+            Btn_SOCKETConnect.Enabled = !active && !tcpConn;
+            Btn_SOCKETDisconnect.Enabled = !active && tcpConn;
+
             if (!active) TStripProBar_SendState.Value = 0;
+        }
+
+        // ============================================================
+        //  소켓(Ethernet) 연결
+        // ============================================================
+
+        /// <summary>Connect 버튼: Tbox_IPAddress:Tbox_Port로 보드(TCP 서버)에 접속.</summary>
+        private void Btn_SOCKETConnect_Click(object sender, EventArgs e)
+        {
+            if (_tcp != null && _tcp.IsConnected) return;
+
+            string ip = Tbox_IPAddress.Text.Trim();
+            if (!int.TryParse(Tbox_Port.Text.Trim(), out int port) || port < 1 || port > 65535)
+            {
+                MessageBox.Show("포트 번호가 올바르지 않습니다 (1~65535).");
+                return;
+            }
+
+            try
+            {
+                _tcp = new TcpLink(ip, port);
+                UpdateSocketConnState(true);
+                AppendLog($"[CONNECT] {ip}:{port} 연결됨\r\n");
+            }
+            catch (Exception ex)
+            {
+                _tcp?.Dispose();
+                _tcp = null;
+                UpdateSocketConnState(false);
+                MessageBox.Show("소켓 연결 실패: " + ex.Message);
+            }
+        }
+
+        /// <summary>Disconnect 버튼: TCP 연결을 닫는다.</summary>
+        private void Btn_SOCKETDisconnect_Click(object sender, EventArgs e)
+        {
+            _tcp?.Dispose();
+            _tcp = null;
+            UpdateSocketConnState(false);
+            AppendLog("[DISCONNECT]\r\n");
+        }
+
+        /// <summary>소켓 연결 상태에 따라 Connect/Disconnect 버튼과 상태 표시줄을 갱신한다.</summary>
+        private void UpdateSocketConnState(bool connected)
+        {
+            if (InvokeRequired) { BeginInvoke(new Action(() => UpdateSocketConnState(connected))); return; }
+            Btn_SOCKETConnect.Enabled = !connected;
+            Btn_SOCKETDisconnect.Enabled = connected;
+            ProgressBar_SocketState.Maximum = 100;
+            ProgressBar_SocketState.Value = connected ? 100 : 0;   // 연결됨=가득 참(상태 표시)
         }
 
         /// <summary>Intel HEX 파일을 파싱해 baseAddress 기준 연속 바이너리로 변환한다.</summary>

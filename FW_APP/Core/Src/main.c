@@ -18,15 +18,27 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
-#include "string.h"
+#include "lwip.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "flash_if.h"
+#include "net_link.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
+
+/* 전송 추상화: OTA 프로토콜(App_EnterDownloadMode)이 UART/TCP에 무관하게
+ * 동작하도록 고정 길이 recv/send와 워치독 pet을 함수 포인터로 노출한다.
+ *   recv: 정확히 len 바이트 수신(timeoutMs==0이면 무한). 성공 true.
+ *   send: len 바이트 전량 송신. 성공 true.
+ *   pet : 워치독 갱신(+TCP면 lwIP 펌핑). 긴 erase/전송 중 리셋·연결끊김 방지. */
+typedef struct {
+  bool (*recv)(uint8_t *buf, uint32_t len, uint32_t timeoutMs);
+  bool (*send)(const uint8_t *buf, uint32_t len);
+  void (*pet)(void);
+} FwTransport;
 
 /* USER CODE END PTD */
 
@@ -41,12 +53,7 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
-
-ETH_TxPacketConfig TxConfig;
-ETH_DMADescTypeDef  DMARxDscrTab[ETH_RX_DESC_CNT]; /* Ethernet Rx DMA Descriptors */
-ETH_DMADescTypeDef  DMATxDscrTab[ETH_TX_DESC_CNT]; /* Ethernet Tx DMA Descriptors */
-
-ETH_HandleTypeDef heth;
+CRC_HandleTypeDef hcrc;
 
 IWDG_HandleTypeDef hiwdg;
 
@@ -61,17 +68,50 @@ PCD_HandleTypeDef hpcd_USB_OTG_FS;
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
-static void MX_ETH_Init(void);
 static void MX_USART3_UART_Init(void);
 static void MX_USB_OTG_FS_PCD_Init(void);
 static void MX_IWDG_Init(void);
+static void MX_CRC_Init(void);
 /* USER CODE BEGIN PFP */
-static void App_EnterDownloadMode(void);
+static void App_EnterDownloadMode(const FwTransport *t);
 static uint16_t App_Crc16(const uint8_t *data, uint32_t len);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+/* --- UART 전송 백엔드 (USART3, 기존 경로) --- */
+static bool Uart_Recv(uint8_t *buf, uint32_t len, uint32_t timeoutMs)
+{
+  uint32_t to = (timeoutMs == 0U) ? HAL_MAX_DELAY : timeoutMs;
+  return HAL_UART_Receive(&huart3, buf, (uint16_t)len, to) == HAL_OK;
+}
+static bool Uart_Send(const uint8_t *buf, uint32_t len)
+{
+  return HAL_UART_Transmit(&huart3, (uint8_t *)buf, (uint16_t)len, HAL_MAX_DELAY) == HAL_OK;
+}
+static void Uart_Pet(void)
+{
+  IWDG->KR = 0x0000AAAAU;
+}
+
+/* --- TCP 전송 백엔드 (lwIP, net_link) --- */
+static bool Tcp_Recv(uint8_t *buf, uint32_t len, uint32_t timeoutMs)
+{
+  return NetLink_Recv(buf, len, timeoutMs);
+}
+static bool Tcp_Send(const uint8_t *buf, uint32_t len)
+{
+  return NetLink_Send(buf, len);
+}
+static void Tcp_Pet(void)
+{
+  IWDG->KR = 0x0000AAAAU;   /* 워치독 갱신 */
+  NetLink_Poll();           /* + lwIP 펌핑: 긴 erase/전송 중에도 연결(ACK/재전송) 유지 */
+}
+
+static const FwTransport uartTransport = { Uart_Recv, Uart_Send, Uart_Pet };
+static const FwTransport tcpTransport  = { Tcp_Recv,  Tcp_Send,  Tcp_Pet  };
 
 /* USER CODE END 0 */
 
@@ -109,10 +149,11 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
-  MX_ETH_Init();
   MX_USART3_UART_Init();
   MX_USB_OTG_FS_PCD_Init();
   MX_IWDG_Init();
+  MX_CRC_Init();
+  MX_LWIP_Init();
   /* USER CODE BEGIN 2 */
 
   /* 시험 부팅(TRIAL) 중이면 자가진단 후 '정상 확인(CONFIRMED)'을 기록한다.
@@ -129,6 +170,9 @@ int main(void)
     }
   }
 
+  /* TCP 링크 초기화: 포트 7 리슨 시작 (MX_LWIP_Init 이후여야 함) */
+  NetLink_Init();
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -143,16 +187,22 @@ int main(void)
      * 리셋 안 됨. 앱이 멈추면 갱신이 끊겨 리셋 → 롤백. (IWDG 미가동 시엔 무해한 no-op) */
     IWDG->KR = 0x0000AAAAU;
 
-    /* === 앱 정상 모드 ===
+    /* lwIP 서비스: 수신 패킷 처리(ethernetif_input) + 타이머(ARP/TCP) + 링크상태 점검.
+     * 베어메탈(NO_SYS)이므로 메인 루프가 주기적으로 직접 호출해야 스택이 동작한다.
+     * NetLink_Poll() == MX_LWIP_Process() 래퍼. */
+    NetLink_Poll();
+
+    /* === 앱 정상 모드 — UART/TCP 두 경로에서 동시에 "FWUPDATE"를 감시 ===
      * · LD1(초록)을 0.5초마다 토글 = 앱 정상 실행 중(하트비트)
-     * · 동시에 UART로 "FWUPDATE" 명령을 감시 → 수신되면 다운로드 모드로 전환
+     * · UART 또는 TCP로 "FWUPDATE"가 오면 해당 전송계층으로 다운로드 모드 진입
      * (베어메탈: 짧은 타임아웃 폴링으로 통신 감시와 LED를 함께 처리) */
     static const char FW_UPDATE_CMD[] = "FWUPDATE";
-    static uint8_t  cmdIdx   = 0U;
+    static uint8_t  cmdIdx    = 0U;   /* UART 매처 인덱스 */
+    static uint8_t  tcpCmdIdx = 0U;   /* TCP 매처 인덱스 */
     static uint32_t lastBlink = 0U;
     uint8_t ch;
 
-    /* UART 1바이트 폴링 (10ms 타임아웃) */
+    /* UART 1바이트 폴링 (10ms 타임아웃) → 매칭 시 UART 전송계층으로 다운로드 */
     if (HAL_UART_Receive(&huart3, &ch, 1U, 10U) == HAL_OK)
     {
       if (ch == (uint8_t)FW_UPDATE_CMD[cmdIdx])
@@ -160,8 +210,8 @@ int main(void)
         cmdIdx++;
         if (FW_UPDATE_CMD[cmdIdx] == '\0')   /* "FWUPDATE" 전체 매칭 */
         {
-          App_EnterDownloadMode();           /* 다운로드 모드 진입 (현재는 돌아오지 않음) */
           cmdIdx = 0U;
+          App_EnterDownloadMode(&uartTransport);   /* 성공 시 재부팅되어 돌아오지 않음 */
         }
       }
       else
@@ -171,10 +221,36 @@ int main(void)
       }
     }
 
+    /* TCP: 연결돼 있으면 수신 링버퍼의 바이트를 훑어 "FWUPDATE" 매칭 → TCP 전송계층으로 다운로드.
+     * 매처는 정확히 "FWUPDATE" 8바이트만 소비하고 멈추므로, 이후 헤더/청크는 그대로 남아
+     * App_EnterDownloadMode(&tcpTransport)의 t->recv가 이어서 읽는다.
+     * (프로토콜상 PC는 READY 응답을 받은 뒤에야 헤더를 보내므로 오버랩 없음) */
+    if (NetLink_Connected())
+    {
+      uint8_t tb;
+      while (NetLink_ReadAvailable(&tb, 1U) == 1U)
+      {
+        if (tb == (uint8_t)FW_UPDATE_CMD[tcpCmdIdx])
+        {
+          tcpCmdIdx++;
+          if (FW_UPDATE_CMD[tcpCmdIdx] == '\0')
+          {
+            tcpCmdIdx = 0U;
+            App_EnterDownloadMode(&tcpTransport);   /* 성공 시 재부팅 */
+            break;
+          }
+        }
+        else
+        {
+          tcpCmdIdx = (tb == (uint8_t)FW_UPDATE_CMD[0]) ? 1U : 0U;
+        }
+      }
+    }
+
     /* 하트비트: 0.5초마다 초록 LED 토글 */
     if ((HAL_GetTick() - lastBlink) >= 100U)
     {
-      HAL_GPIO_TogglePin(LD1_GPIO_Port, LD1_Pin);
+      HAL_GPIO_TogglePin(LD2_GPIO_Port, LD2_Pin);
       lastBlink = HAL_GetTick();
     }
   }
@@ -228,51 +304,28 @@ void SystemClock_Config(void)
 }
 
 /**
-  * @brief ETH Initialization Function
+  * @brief CRC Initialization Function
   * @param None
   * @retval None
   */
-static void MX_ETH_Init(void)
+static void MX_CRC_Init(void)
 {
 
-  /* USER CODE BEGIN ETH_Init 0 */
+  /* USER CODE BEGIN CRC_Init 0 */
 
-  /* USER CODE END ETH_Init 0 */
+  /* USER CODE END CRC_Init 0 */
 
-   static uint8_t MACAddr[6];
+  /* USER CODE BEGIN CRC_Init 1 */
 
-  /* USER CODE BEGIN ETH_Init 1 */
-
-  /* USER CODE END ETH_Init 1 */
-  heth.Instance = ETH;
-  MACAddr[0] = 0x00;
-  MACAddr[1] = 0x80;
-  MACAddr[2] = 0xE1;
-  MACAddr[3] = 0x00;
-  MACAddr[4] = 0x00;
-  MACAddr[5] = 0x00;
-  heth.Init.MACAddr = &MACAddr[0];
-  heth.Init.MediaInterface = HAL_ETH_RMII_MODE;
-  heth.Init.TxDesc = DMATxDscrTab;
-  heth.Init.RxDesc = DMARxDscrTab;
-  heth.Init.RxBuffLen = 1524;
-
-  /* USER CODE BEGIN MACADDRESS */
-
-  /* USER CODE END MACADDRESS */
-
-  if (HAL_ETH_Init(&heth) != HAL_OK)
+  /* USER CODE END CRC_Init 1 */
+  hcrc.Instance = CRC;
+  if (HAL_CRC_Init(&hcrc) != HAL_OK)
   {
     Error_Handler();
   }
+  /* USER CODE BEGIN CRC_Init 2 */
 
-  memset(&TxConfig, 0 , sizeof(ETH_TxPacketConfig));
-  TxConfig.Attributes = ETH_TX_PACKETS_FEATURES_CSUM | ETH_TX_PACKETS_FEATURES_CRCPAD;
-  TxConfig.ChecksumCtrl = ETH_CHECKSUM_IPHDR_PAYLOAD_INSERT_PHDR_CALC;
-  TxConfig.CRCPadCtrl = ETH_CRC_PAD_INSERT;
-  /* USER CODE BEGIN ETH_Init 2 */
-
-  /* USER CODE END ETH_Init 2 */
+  /* USER CODE END CRC_Init 2 */
 
 }
 
@@ -458,7 +511,7 @@ static uint16_t App_Crc16(const uint8_t *data, uint32_t len)
   *           MCU → 전부 받으면 "DONE" 전송
   *         [5단계 예정] DONE 후 플래그 세팅 + 재부팅. 지금은 파랑 켠 채 멈춤.
   */
-static void App_EnterDownloadMode(void)
+static void App_EnterDownloadMode(const FwTransport *t)
 {
   const char ready[]  = "READY\r\n";
   const char done[]   = "DONE\r\n";
@@ -468,12 +521,17 @@ static void App_EnterDownloadMode(void)
   uint8_t  hdr[8];
   uint32_t total, expectCrc, addr, remaining;
 
+  /* 모든 wire I/O는 전송 계층(t)을 통한다 → UART/TCP 동일 로직으로 동작.
+   *   t->recv(buf,len,0)  : 정확 len 수신(무한 대기)
+   *   t->send(buf,len)    : len 전량 송신
+   *   t->pet()            : 워치독 갱신(+TCP면 lwIP 펌핑) */
+
   HAL_GPIO_WritePin(LD1_GPIO_Port, LD1_Pin, GPIO_PIN_RESET);   /* 초록 끔 */
   HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_SET);     /* 파랑: 다운로드 모드 */
-  HAL_UART_Transmit(&huart3, (uint8_t *)ready, sizeof(ready) - 1U, HAL_MAX_DELAY);
+  if (!t->send((const uint8_t *)ready, sizeof(ready) - 1U)) goto stop;
 
   /* 1) 헤더 수신: [전체크기 4B][CRC32 4B] (little-endian) */
-  if (HAL_UART_Receive(&huart3, hdr, 8U, HAL_MAX_DELAY) != HAL_OK) goto stop;
+  if (!t->recv(hdr, 8U, 0U)) goto stop;
   total = (uint32_t)hdr[0]
         | ((uint32_t)hdr[1] << 8)
         | ((uint32_t)hdr[2] << 16)
@@ -486,18 +544,18 @@ static void App_EnterDownloadMode(void)
   /* 크기 유효성 검사 */
   if ((total == 0U) || (total > STAGING_SIZE))
   {
-    HAL_UART_Transmit(&huart3, &nack, 1U, HAL_MAX_DELAY);
+    (void)t->send(&nack, 1U);
     goto stop;
   }
 
   /* 2) Staging 영역에서 필요한 만큼 지우기 */
-  IWDG->KR = 0x0000AAAAU;   /* 지우기 직전 워치독 갱신 (큰 erase가 타임아웃 넘기지 않도록) */
+  t->pet();   /* 지우기 직전 워치독 갱신(+TCP 펌핑) — 큰 erase가 타임아웃/연결끊김 넘기지 않도록 */
   if (FlashIf_EraseRange(STAGING_ADDRESS, STAGING_ADDRESS + total - 1U) != FLASH_IF_OK)
   {
-    HAL_UART_Transmit(&huart3, &nack, 1U, HAL_MAX_DELAY);
+    (void)t->send(&nack, 1U);
     goto stop;
   }
-  HAL_UART_Transmit(&huart3, &ack, 1U, HAL_MAX_DELAY);   /* 지우기 완료 ACK */
+  if (!t->send(&ack, 1U)) goto stop;   /* 지우기 완료 ACK */
 
   /* 3) 청크 수신 → CRC16 검증 → Staging 기록.
    *    각 청크: [데이터 n바이트][CRC16 2바이트, LE]
@@ -510,13 +568,13 @@ static void App_EnterDownloadMode(void)
     uint8_t  crcBuf[2];
     uint8_t  retries = 0U;
 
-    IWDG->KR = 0x0000AAAAU;   /* 청크마다 워치독 갱신 (긴 전송 중 리셋 방지) */
+    t->pet();   /* 청크마다 워치독 갱신(+TCP 펌핑) */
 
     /* 이 청크가 CRC를 통과할 때까지 재수신 */
     for (;;)
     {
-      if (HAL_UART_Receive(&huart3, buf, (uint16_t)n, HAL_MAX_DELAY) != HAL_OK) goto stop;
-      if (HAL_UART_Receive(&huart3, crcBuf, 2U, HAL_MAX_DELAY) != HAL_OK) goto stop;
+      if (!t->recv(buf, n, 0U)) goto stop;
+      if (!t->recv(crcBuf, 2U, 0U)) goto stop;
 
       uint16_t rxCrc = (uint16_t)crcBuf[0] | ((uint16_t)crcBuf[1] << 8);
       if (App_Crc16(buf, n) == rxCrc)
@@ -525,7 +583,7 @@ static void App_EnterDownloadMode(void)
       }
 
       /* 깨짐 → NACK, PC가 같은 청크를 재전송한다 */
-      HAL_UART_Transmit(&huart3, &nack, 1U, HAL_MAX_DELAY);
+      (void)t->send(&nack, 1U);
       if (++retries >= 5U) goto stop;   /* 같은 청크 5회 실패 → 포기 */
     }
 
@@ -534,10 +592,10 @@ static void App_EnterDownloadMode(void)
     for (uint32_t i = n; i < nAligned; i++) buf[i] = 0xFFU;
     if (FlashIf_Write(addr, buf, nAligned) != FLASH_IF_OK)
     {
-      HAL_UART_Transmit(&huart3, &nack, 1U, HAL_MAX_DELAY);
+      (void)t->send(&nack, 1U);
       goto stop;
     }
-    HAL_UART_Transmit(&huart3, &ack, 1U, HAL_MAX_DELAY);   /* 청크 확정 ACK */
+    if (!t->send(&ack, 1U)) goto stop;   /* 청크 확정 ACK */
 
     addr += n;
     remaining -= n;
@@ -548,10 +606,10 @@ static void App_EnterDownloadMode(void)
   if (FlashIf_Crc32((const uint8_t *)STAGING_ADDRESS, total) != expectCrc)
   {
     /* 불일치 → 플래그를 남기지 않는다. 깨진 펌웨어는 절대 적용되지 않음. */
-    HAL_UART_Transmit(&huart3, (uint8_t *)crcerr, sizeof(crcerr) - 1U, HAL_MAX_DELAY);
+    (void)t->send((const uint8_t *)crcerr, sizeof(crcerr) - 1U);
     goto stop;
   }
-  HAL_UART_Transmit(&huart3, (uint8_t *)done, sizeof(done) - 1U, HAL_MAX_DELAY);
+  if (!t->send((const uint8_t *)done, sizeof(done) - 1U)) goto stop;
 
   /* 5) '업데이트 대기' 플래그(메타데이터) 기록 후 재부팅 → 부트로더가 적용 */
   {
@@ -564,7 +622,14 @@ static void App_EnterDownloadMode(void)
     meta.reserved = 0U;
     FlashIf_WriteMeta(&meta);
   }
-  HAL_Delay(100);          /* UART 송신/플래시 마무리 여유 */
+
+  /* 재부팅 전 잠깐: 마지막 응답(DONE)이 실제로 상대에 도달하도록 전송계층을 계속 펌핑.
+   * UART는 이미 블로킹 송신 완료 상태지만, TCP는 lwIP가 세그먼트를 flush/재전송할
+   * 시간이 필요하다(HAL_Delay로 멈추면 lwIP가 못 돌아 재전송 불가). */
+  {
+    uint32_t t0 = HAL_GetTick();
+    while ((HAL_GetTick() - t0) < 150U) { t->pet(); }
+  }
   NVIC_SystemReset();      /* 재부팅 (돌아오지 않음) */
 
 stop:

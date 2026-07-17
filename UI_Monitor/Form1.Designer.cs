@@ -465,11 +465,11 @@
             this.TStripProBar_SendState,
             this.TSStatusLb_Percent,
             this.TSStatusLb_nCounter});
-            this.StatusStrip1.Location = new System.Drawing.Point(0, 399);
+            this.StatusStrip1.Location = new System.Drawing.Point(0, 404);
             this.StatusStrip1.Name = "StatusStrip1";
             this.StatusStrip1.Padding = new System.Windows.Forms.Padding(1, 0, 12, 0);
             this.StatusStrip1.RenderMode = System.Windows.Forms.ToolStripRenderMode.ManagerRenderMode;
-            this.StatusStrip1.Size = new System.Drawing.Size(800, 15);
+            this.StatusStrip1.Size = new System.Drawing.Size(800, 23);
             this.StatusStrip1.TabIndex = 44;
             this.StatusStrip1.Text = "statusStrip1";
             // 
@@ -477,17 +477,17 @@
             // 
             this.TStripProBar_SendState.AutoSize = false;
             this.TStripProBar_SendState.Name = "TStripProBar_SendState";
-            this.TStripProBar_SendState.Size = new System.Drawing.Size(100, 9);
+            this.TStripProBar_SendState.Size = new System.Drawing.Size(100, 17);
             // 
             // TSStatusLb_Percent
             // 
             this.TSStatusLb_Percent.Name = "TSStatusLb_Percent";
-            this.TSStatusLb_Percent.Size = new System.Drawing.Size(0, 10);
+            this.TSStatusLb_Percent.Size = new System.Drawing.Size(0, 18);
             // 
             // TSStatusLb_nCounter
             // 
             this.TSStatusLb_nCounter.Name = "TSStatusLb_nCounter";
-            this.TSStatusLb_nCounter.Size = new System.Drawing.Size(0, 10);
+            this.TSStatusLb_nCounter.Size = new System.Drawing.Size(0, 18);
             // 
             // GroupBox_ViewerRS232
             // 
@@ -499,9 +499,9 @@
             this.GroupBox_ViewerRS232.Controls.Add(this.Btn_Clear_RS232Log);
             this.GroupBox_ViewerRS232.Controls.Add(this.Tbox_RS232_ReceivedLog);
             this.GroupBox_ViewerRS232.Font = new System.Drawing.Font("Gulim", 9F, ((System.Drawing.FontStyle)((System.Drawing.FontStyle.Bold | System.Drawing.FontStyle.Underline))));
-            this.GroupBox_ViewerRS232.Location = new System.Drawing.Point(172, 102);
+            this.GroupBox_ViewerRS232.Location = new System.Drawing.Point(172, 122);
             this.GroupBox_ViewerRS232.Name = "GroupBox_ViewerRS232";
-            this.GroupBox_ViewerRS232.Size = new System.Drawing.Size(617, 294);
+            this.GroupBox_ViewerRS232.Size = new System.Drawing.Size(617, 273);
             this.GroupBox_ViewerRS232.TabIndex = 46;
             this.GroupBox_ViewerRS232.TabStop = false;
             this.GroupBox_ViewerRS232.Text = "Received Viewer(RS-232)";
@@ -555,7 +555,7 @@
             this.Tbox_RS232_ReceivedLog.Multiline = true;
             this.Tbox_RS232_ReceivedLog.Name = "Tbox_RS232_ReceivedLog";
             this.Tbox_RS232_ReceivedLog.ScrollBars = System.Windows.Forms.ScrollBars.Vertical;
-            this.Tbox_RS232_ReceivedLog.Size = new System.Drawing.Size(609, 241);
+            this.Tbox_RS232_ReceivedLog.Size = new System.Drawing.Size(609, 220);
             this.Tbox_RS232_ReceivedLog.TabIndex = 27;
             // 
             // GroupBox_ViewerEthernet
@@ -568,9 +568,9 @@
             this.GroupBox_ViewerEthernet.Controls.Add(this.Btn_Clear_EthernetLog);
             this.GroupBox_ViewerEthernet.Controls.Add(this.Tbox_Ethernet_ReceivedLog);
             this.GroupBox_ViewerEthernet.Font = new System.Drawing.Font("Gulim", 9F, ((System.Drawing.FontStyle)((System.Drawing.FontStyle.Bold | System.Drawing.FontStyle.Underline))));
-            this.GroupBox_ViewerEthernet.Location = new System.Drawing.Point(172, 102);
+            this.GroupBox_ViewerEthernet.Location = new System.Drawing.Point(172, 130);
             this.GroupBox_ViewerEthernet.Name = "GroupBox_ViewerEthernet";
-            this.GroupBox_ViewerEthernet.Size = new System.Drawing.Size(617, 294);
+            this.GroupBox_ViewerEthernet.Size = new System.Drawing.Size(617, 265);
             this.GroupBox_ViewerEthernet.TabIndex = 47;
             this.GroupBox_ViewerEthernet.TabStop = false;
             this.GroupBox_ViewerEthernet.Text = "Received Viewer(Ethernet)";
@@ -625,7 +625,7 @@
             this.Tbox_Ethernet_ReceivedLog.Multiline = true;
             this.Tbox_Ethernet_ReceivedLog.Name = "Tbox_Ethernet_ReceivedLog";
             this.Tbox_Ethernet_ReceivedLog.ScrollBars = System.Windows.Forms.ScrollBars.Vertical;
-            this.Tbox_Ethernet_ReceivedLog.Size = new System.Drawing.Size(609, 241);
+            this.Tbox_Ethernet_ReceivedLog.Size = new System.Drawing.Size(609, 212);
             this.Tbox_Ethernet_ReceivedLog.TabIndex = 27;
             // 
             // Btn_FW_Open
@@ -679,7 +679,7 @@
             this.groupBox_FWUpdate.Font = new System.Drawing.Font("Gulim", 9F, ((System.Drawing.FontStyle)((System.Drawing.FontStyle.Bold | System.Drawing.FontStyle.Underline))));
             this.groupBox_FWUpdate.Location = new System.Drawing.Point(172, 12);
             this.groupBox_FWUpdate.Name = "groupBox_FWUpdate";
-            this.groupBox_FWUpdate.Size = new System.Drawing.Size(617, 84);
+            this.groupBox_FWUpdate.Size = new System.Drawing.Size(617, 97);
             this.groupBox_FWUpdate.TabIndex = 48;
             this.groupBox_FWUpdate.TabStop = false;
             this.groupBox_FWUpdate.Text = "Firmware Update";
@@ -698,7 +698,7 @@
             // 
             this.AutoScaleDimensions = new System.Drawing.SizeF(6F, 13F);
             this.AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font;
-            this.ClientSize = new System.Drawing.Size(800, 414);
+            this.ClientSize = new System.Drawing.Size(800, 427);
             this.Controls.Add(this.groupBox_FWUpdate);
             this.Controls.Add(this.GroupBox_ViewerRS232);
             this.Controls.Add(this.StatusStrip1);
