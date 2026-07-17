@@ -1,4 +1,4 @@
-# STM32F429 무선 펌웨어 업데이트 시스템 (OTA / IAP)
+# STM32F429 펌웨어 업데이트 시스템
 
 <p align="center">
   <img src="docs/NUCLEO-F429ZI%20Top%20View.png" alt="NUCLEO-F429ZI Top View" width="480">
