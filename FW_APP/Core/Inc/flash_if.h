@@ -76,6 +76,15 @@ typedef enum
 /** @brief  startAddr~endAddr 를 포함하는 섹터들을 지운다 (섹터 단위). */
 FlashIf_Status FlashIf_EraseRange(uint32_t startAddr, uint32_t endAddr);
 
+/**
+  * @brief  addr 가 속한 섹터의 '바로 다음 섹터 시작 주소'를 반환한다.
+  * @note   섹터를 하나씩 지우며 중간에 워치독을 갱신/양보하기 위한 것.
+  *         F429 섹터 크기는 불균일하다(16K×4 / 64K×1 / 128K×7, 뱅크마다 반복).
+  *         Staging은 전부 128KB라 단순 덧셈으로도 되지만 Factory(0x080A_0000~0x0811_FFFF)는
+  *         128K×3 + 16K×4 + 64K×1 로 섞여 있어 이 함수가 반드시 필요하다.
+  */
+uint32_t FlashIf_NextSectorAddr(uint32_t addr);
+
 /** @brief  애플리케이션 실행 영역(APP_ADDRESS~APP_END_ADDRESS)을 지운다. */
 FlashIf_Status FlashIf_EraseApp(void);
 

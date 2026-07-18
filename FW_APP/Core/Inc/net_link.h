@@ -1,10 +1,16 @@
 /**
   ******************************************************************************
   * @file    net_link.h
-  * @brief   베어메탈(NO_SYS) lwIP RAW TCP 위의 "블로킹 전송 링크".
-  *          OTA 프로토콜(App_EnterDownloadMode)이 UART처럼 고정 길이로
-  *          recv/send 하도록, RX 링버퍼 + 블로킹 래퍼를 제공한다.
-  *          (M2: TCP echo 검증 / M3: FwTransport의 TCP 백엔드로 재사용)
+  * @brief   TCP 링크 (BSD 소켓 기반). 보드가 서버, PC(UI_Monitor)가 클라이언트.
+  *
+  *  [R4] 왜 다시 썼나:
+  *   베어메탈(NO_SYS) 시절에는 lwIP RAW API + 4KB 링버퍼 + 수동 펌핑(MX_LWIP_Process)으로
+  *   '블로킹 수신'을 흉내 내야 했다. FreeRTOS로 오면서 lwIP가 자체 tcpip_thread를 갖게 되어
+  *   그 구조는 (a) 더 이상 필요 없고 (b) RAW API를 tcpip 스레드 밖에서 부르는 것이라
+  *   스레드 안전하지도 않다. 소켓 API는 '정확히 n바이트 블로킹 수신'을 그대로 제공하므로
+  *   링버퍼·백프레셔·펌핑 코드가 통째로 사라진다.
+  *
+  *  OTA 프로토콜은 UART와 완전히 동일하다(FwTransport 뒤에 숨는다).
   ******************************************************************************
   */
 #ifndef NET_LINK_H
@@ -20,33 +26,43 @@ extern "C" {
 /* TCP 서버 리슨 포트 (C# UI_Monitor의 기본 접속 포트와 일치) */
 #define NETLINK_PORT   7U
 
-/** lwIP(MX_LWIP_Init) 초기화 후 1회 호출: TCP 리슨 시작. */
-void     NetLink_Init(void);
+/** @brief 내부 상태 초기화. 서버를 열기 전에 한 번 호출. */
+void NetLink_Init(void);
 
-/** 메인 루프/대기 루프에서 주기 호출: lwIP 서비스(수신/타이머/링크).
- *  NO_SYS이므로 이 호출이 없으면 스택이 전혀 진행되지 않는다. */
-void     NetLink_Poll(void);
+/** @brief 리슨 소켓 생성(socket/bind/listen). 실패 시 false. */
+bool NetLink_ServerOpen(void);
 
-/** 클라이언트가 연결돼 있으면 true. */
-bool     NetLink_Connected(void);
+/**
+  * @brief  클라이언트 접속을 수락한다.
+  * @param  timeoutMs 이 시간 안에 접속이 없으면 false를 반환(호출자가 체크인하러 나올 수 있게).
+  * @note   수락한 소켓에는 TCP_NODELAY를 건다. 이 프로토콜은 청크마다 1바이트 ACK를
+  *         주고받는 stop-and-wait이라, Nagle이 켜져 있으면 지연 ACK와 맞물려
+  *         매 청크가 수백 ms씩 밀려 전송이 수 분대로 무너진다.
+  */
+bool NetLink_Accept(uint32_t timeoutMs);
 
-/** RX 링버퍼에 현재 쌓여 있는 바이트 수. */
-uint32_t NetLink_Available(void);
+/** @brief 클라이언트가 연결돼 있으면 true. */
+bool NetLink_Connected(void);
 
-/** 논블로킹 수신: 있는 만큼(최대 max) 읽어 실제 읽은 바이트 수를 반환. */
-uint32_t NetLink_ReadAvailable(uint8_t *buf, uint32_t max);
+/** @brief 현재 클라이언트 연결만 닫는다(리슨 소켓은 유지). */
+void NetLink_CloseClient(void);
 
-/** 블로킹 수신: 정확히 len 바이트를 받을 때까지 대기.
- *  내부에서 lwIP 펌핑 + 워치독 갱신을 수행한다.
- *  @param timeoutMs 0이면 무한 대기. 연결 끊김 또는 타임아웃 시 false. */
-bool     NetLink_Recv(uint8_t *buf, uint32_t len, uint32_t timeoutMs);
+/**
+  * @brief  정확히 len 바이트를 받을 때까지 블로킹 수신.
+  * @param  timeoutMs 0이면 무한 대기(UART의 HAL_MAX_DELAY와 같은 의미).
+  *                   0이 아니면 '이 호출 전체'에 대한 총 데드라인이다.
+  * @retval 전부 받으면 true. 타임아웃/연결종료/오류면 false.
+  */
+bool NetLink_Recv(uint8_t *buf, uint32_t len, uint32_t timeoutMs);
 
-/** 블로킹 송신: len 바이트를 모두 송신 큐에 넣고 flush(tcp_output).
- *  내부에서 lwIP 펌핑 + 워치독 갱신. 실패/끊김/타임아웃 시 false. */
-bool     NetLink_Send(const uint8_t *buf, uint32_t len);
+/**
+  * @brief  있는 만큼만 수신(부분 수신 허용).
+  * @retval >0 읽은 바이트 수, 0 타임아웃, -1 연결 종료/오류.
+  */
+int  NetLink_RecvSome(uint8_t *buf, uint32_t maxLen, uint32_t timeoutMs);
 
-/** 현재 연결을 닫는다(있을 때). */
-void     NetLink_Close(void);
+/** @brief len 바이트를 전부 송신. 실패/타임아웃 시 false. */
+bool NetLink_Send(const uint8_t *buf, uint32_t len);
 
 #ifdef __cplusplus
 }

@@ -44,6 +44,33 @@ static uint32_t FlashIf_GetSector(uint32_t addr)
   else                         return FLASH_SECTOR_23;
 }
 
+uint32_t FlashIf_NextSectorAddr(uint32_t addr)
+{
+  /* 섹터 경계표 (FlashIf_GetSector 의 경계와 동일하게 유지할 것).
+   * 각 값은 '그 섹터의 끝 다음 주소' = 다음 섹터의 시작이다. */
+  static const uint32_t bounds[] = {
+    /* Bank1 */
+    0x08004000U, 0x08008000U, 0x0800C000U, 0x08010000U,   /* S0~S3  16K */
+    0x08020000U,                                          /* S4     64K */
+    0x08040000U, 0x08060000U, 0x08080000U, 0x080A0000U,
+    0x080C0000U, 0x080E0000U, 0x08100000U,                /* S5~S11 128K */
+    /* Bank2 */
+    0x08104000U, 0x08108000U, 0x0810C000U, 0x08110000U,   /* S12~S15 16K */
+    0x08120000U,                                          /* S16     64K */
+    0x08140000U, 0x08160000U, 0x08180000U, 0x081A0000U,
+    0x081C0000U, 0x081E0000U, 0x08200000U                 /* S17~S23 128K */
+  };
+
+  for (uint32_t i = 0U; i < (sizeof(bounds) / sizeof(bounds[0])); i++)
+  {
+    if (addr < bounds[i])
+    {
+      return bounds[i];
+    }
+  }
+  return 0x08200000U;   /* 플래시 끝 */
+}
+
 FlashIf_Status FlashIf_EraseRange(uint32_t startAddr, uint32_t endAddr)
 {
   FLASH_EraseInitTypeDef erase = {0};

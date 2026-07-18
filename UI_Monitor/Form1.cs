@@ -22,6 +22,10 @@ namespace UI_Monitor
         private SerialLink _serialLink;
         private TcpLink _tcp;
 
+        // Ethernet 상태 폴링 타이머(1초). Tick은 UI 스레드에서 돈다 — 전송(Task.Run)과
+        // 끼어들지 않도록 SetTransferUi가 시작/정지를 관리한다.
+        private readonly System.Windows.Forms.Timer _infoTimer = new System.Windows.Forms.Timer();
+
         // 앱 실행영역 시작 주소 (flash_if.h의 APP_ADDRESS와 일치)
         private const uint APP_BASE_ADDRESS = 0x08020000;
 
@@ -29,8 +33,11 @@ namespace UI_Monitor
         // 청크별 checksum + 자동 재전송이 동작하는지 확인용. (검증 완료 → 평소엔 false)
         private bool _debugCorruptFirstAttempt = false;
 
-        // Open으로 로드된 펌웨어 이미지 (Download 시 전송)
-        private byte[] _fwImage;
+        // Open으로 로드된 펌웨어 이미지 (Download 시 전송).
+        // APP(Staging)용과 FACTORY용을 각각 따로 들고 있어야 서로 다른 펌웨어를 넣어
+        // '롤백이 실제로 복원되는지'를 눈으로 확인할 수 있다.
+        private byte[] _fwImage;        // FW_APP  → Btn_FW_Open      / Btn_FW_Download
+        private byte[] _factoryImage;   // FACTORY → Btn_FACTORY_Open / Btn_FACTORY_Download
 
         // 전송 진행률/속도(실시간 표출) 계산용
         private int _txStartMs;
@@ -52,6 +59,7 @@ namespace UI_Monitor
             _serialLink = new SerialLink(_serial, Serial_DataReceived);   // 프로토콜용 시리얼 래퍼
             FormClosing += (s, e) =>
             {
+                _infoTimer.Stop();
                 if (_serial.IsOpen) _serial.Close();
                 _tcp?.Dispose();
             };
@@ -59,11 +67,25 @@ namespace UI_Monitor
             // 펌웨어 업데이트 버튼 배선 (Designer 컨트롤)
             Btn_FW_Open.Click += Btn_FW_Open_Click;
             Btn_FW_Download.Click += Btn_FW_Download_Click;
+            Btn_FACTORY_Open.Click += Btn_FACTORY_Open_Click;
+            Btn_FACTORY_Download.Click += Btn_FACTORY_Download_Click;
+
+            // 슬롯 전환(전송 없이 재부팅만으로 App 내용을 바꾼다)
+            Btn_ToFACTORY.Click += Btn_ToFACTORY_Click;
+
+            // 대상 슬롯 주소를 참고용으로 표시 (Designer에서 Enabled=false, 읽기 전용).
+            // 실제 기록 위치는 펌웨어(flash_if.h)가 정하며 PC는 주소를 보내지 않는다 —
+            // 임의 주소를 못 보내므로 부트로더/메타데이터를 덮어쓸 위험이 원천 차단된다.
+            textBox_APP_Address.Text = "0x08020000 (512KB)";
+            textBox_FACT_Address.Text = "0x080A0000 (512KB)";
 
             // --- 소켓(Ethernet) 관련 이벤트 연결 ---
             Btn_SOCKETConnect.Click += Btn_SOCKETConnect_Click;
             Btn_SOCKETDisconnect.Click += Btn_SOCKETDisconnect_Click;
             Btn_Clear_EthernetLog.Click += (s, e) => Tbox_Ethernet_ReceivedLog.Clear();
+
+            _infoTimer.Interval = 1000;                       // RS-232 배너와 같은 주기
+            _infoTimer.Tick += (s, e) => PollFirmwareInfo();
 
             // COM 포트 목록 채우고 초기 버튼 상태 설정
             RefreshComPorts();
@@ -184,38 +206,120 @@ namespace UI_Monitor
         //  펌웨어 전송 (.hex/.bin -> Staging)
         // ============================================================
 
-        /// <summary>Open 버튼: 파일 선택 → 파싱/로드 → 경로·크기 표시.</summary>
+        /// <summary>FW_APP open 버튼: 앱 실행영역(Staging 경유)으로 보낼 펌웨어를 로드.</summary>
         private void Btn_FW_Open_Click(object sender, EventArgs e)
+        {
+            LoadFirmwareInto(ref _fwImage, "FW_APP", textBox_FW_FIle, label_FW_Size);
+        }
+
+        /// <summary>FACTORY open 버튼: 골든 이미지로 넣을 펌웨어를 로드(앱과 별개 파일).</summary>
+        private void Btn_FACTORY_Open_Click(object sender, EventArgs e)
+        {
+            LoadFirmwareInto(ref _factoryImage, "FACTORY", textBox_FACTORY_FIle, label3);
+        }
+
+        /// <summary>
+        /// 파일 선택 → 파싱 → 해당 슬롯의 경로·크기 표시. 취소하면 기존 상태를 유지한다.
+        /// </summary>
+        /// <remarks>
+        /// APP용이든 FACTORY용이든 <b>둘 다 APP_BASE_ADDRESS(0x08020000) 기준으로 파싱</b>한다.
+        /// Factory에 넣는 이미지도 결국 롤백 시 부트로더가 App 실행영역으로 복사하는 것이므로,
+        /// 링커가 0x08020000에 링크한 그 펌웨어여야 하기 때문이다. 기록 위치(Factory 슬롯)는
+        /// MCU가 정하며 PC는 주소를 보내지 않는다.
+        /// </remarks>
+        private void LoadFirmwareInto(ref byte[] target, string slotName, TextBox pathBox, Label sizeLabel)
         {
             using (var dlg = new OpenFileDialog
             {
+                Title = $"{slotName} 펌웨어 선택",
                 Filter = "펌웨어 (*.hex;*.bin)|*.hex;*.bin|Intel HEX (*.hex)|*.hex|Binary (*.bin)|*.bin|모든 파일 (*.*)|*.*"
             })
             {
-                if (dlg.ShowDialog() != DialogResult.OK) return;
+                if (dlg.ShowDialog() != DialogResult.OK) return;   // 취소 → 기존 로드 상태 유지
 
                 try
                 {
-                    _fwImage = dlg.FileName.EndsWith(".hex", StringComparison.OrdinalIgnoreCase)
+                    target = dlg.FileName.EndsWith(".hex", StringComparison.OrdinalIgnoreCase)
                         ? ParseIntelHex(dlg.FileName, APP_BASE_ADDRESS)
                         : PadTo4(File.ReadAllBytes(dlg.FileName));
 
-                    textBox_FW_FIle.Text = dlg.FileName;                       // 선택된 파일 경로 표시
-                    label_FW_Size.Text = $"{_fwImage.Length:N0} Byte";  // 파싱된 이미지 크기 표시
-                    AppendLog($"[FW] {Path.GetFileName(dlg.FileName)} 로드: {_fwImage.Length} bytes\r\n");
+                    pathBox.Text = dlg.FileName;                          // 선택된 파일 경로 표시
+                    sizeLabel.Text = $"{target.Length:N0} Byte";          // 파싱된 이미지 크기 표시
+                    AppendLog($"[{slotName}] {Path.GetFileName(dlg.FileName)} 로드: {target.Length} bytes\r\n");
                 }
                 catch (Exception ex)
                 {
-                    _fwImage = null;
-                    textBox_FW_FIle.Text = "";
-                    label_FW_Size.Text = "0 Byte";
-                    MessageBox.Show("펌웨어 파싱 실패: " + ex.Message);
+                    target = null;
+                    pathBox.Text = "";
+                    sizeLabel.Text = "0 Byte";
+                    MessageBox.Show($"{slotName} 펌웨어 파싱 실패: " + ex.Message);
                 }
             }
         }
 
-        /// <summary>F/W Download 버튼: 현재 모드(RS-232/Ethernet)에 맞는 링크로 펌웨어를 전송.</summary>
+        /// <summary>F/W Download 버튼: 앱 실행영역용 정상 OTA (Staging에 저장 후 보드가 재부팅·적용).</summary>
         private async void Btn_FW_Download_Click(object sender, EventArgs e)
+        {
+            await RunFirmwareTransfer(_fwImage, "FWUPDATE", "Staging", boardReboots: true);
+        }
+
+        /// <summary>
+        /// FACTORY Download 버튼: 골든 이미지(Factory 슬롯)를 직접 교체한다.
+        /// </summary>
+        /// <remarks>
+        /// Factory는 '롤백 복귀처'다. 여기에 다른 펌웨어를 넣어두면 롤백이 실제로 복원되는지
+        /// 눈으로 확인할 수 있다. 다만 고장난 이미지를 넣으면 롤백이 고장난 펌웨어를 복구하게
+        /// 되므로(ST-Link로만 회복 가능) 실행 전에 한 번 확인을 받는다.
+        /// 이 경로는 메타데이터를 건드리지 않고 보드도 재부팅하지 않는다.
+        /// </remarks>
+        private async void Btn_FACTORY_Download_Click(object sender, EventArgs e)
+        {
+            var answer = MessageBox.Show(
+                "Factory(골든 이미지) 슬롯을 덮어씁니다.\n\n" +
+                "Factory는 롤백 시 복구되는 원본입니다.\n" +
+                "고장난 펌웨어를 쓰면 롤백해도 고장난 상태로 복구되며\n" +
+                "ST-Link로만 회복할 수 있습니다.\n\n" +
+                "계속하시겠습니까?",
+                "FACTORY 슬롯 덮어쓰기 확인",
+                MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
+
+            if (answer != DialogResult.Yes) return;
+
+            await RunFirmwareTransfer(_factoryImage, "FWFACTRY", "Factory", boardReboots: false);
+        }
+
+        // ============================================================
+        //  슬롯 전환 (펌웨어 전송 없이 App 실행영역의 내용만 바꾼다)
+        // ============================================================
+
+        /// <summary>
+        /// FACTORY로 전환: 보드가 다음 부팅에서 Factory→App 복원을 수행하게 한다.
+        /// </summary>
+        /// <remarks>
+        /// 자동 롤백은 '앱이 자가확인에 실패(=사실상 멈춤)'했을 때만 발동한다.
+        /// 앱이 살아서 통신은 되는데 기능이 잘못된 경우엔 워치독이 개입하지 않으므로
+        /// 이 버튼으로 직접 되돌린다. 펌웨어를 다시 보내지 않으므로 즉시 완료된다.
+        /// </remarks>
+        private async void Btn_ToFACTORY_Click(object sender, EventArgs e)
+        {
+            var answer = MessageBox.Show(
+                "Factory 이미지로 되돌립니다.\n\n" +
+                "보드가 재부팅되며 App 실행영역이 Factory 내용으로 덮어써집니다.\n" +
+                "되돌아오려면 FW_APP 쪽 [open] → [F/W Download] 로 다시 업로드하세요.\n\n" +
+                "계속하시겠습니까?",
+                "FACTORY로 전환",
+                MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
+
+            if (answer != DialogResult.Yes) return;
+
+            await RunSlotSwitch("FWROLLBK", null, "Factory");
+        }
+
+        /// <summary>
+        /// 슬롯 전환 명령을 보내고 DONE/FAILED 응답을 처리한다(공통).
+        /// </summary>
+        /// <param name="header">명령 뒤에 붙일 8바이트 헤더. 없으면 null.</param>
+        private async Task RunSlotSwitch(string command, byte[] header, string targetName)
         {
             bool eth = RBtn_TransMode_Ethernet.Checked;
 
@@ -239,18 +343,108 @@ namespace UI_Monitor
                 link = _serialLink;
             }
 
-            if (_fwImage == null)
+            SetTransferUi(true);
+            string result = await Task.Run(() => SendSlotSwitch(command, header, link));
+            SetTransferUi(false);
+
+            // 성공하면 보드가 재부팅된다 → Ethernet 연결은 끊어지므로 정리.
+            if (eth && result == "DONE")
             {
-                MessageBox.Show("먼저 Open으로 펌웨어 파일을 선택하세요.");
+                _tcp?.Dispose();
+                _tcp = null;
+                UpdateSocketConnState(false);
+                AppendLog("[i] 보드 재부팅 중 — 다시 쓰려면 재접속(Connect) 하세요.\r\n");
+            }
+
+            if (result == "DONE")
+            {
+                MessageBox.Show($"{targetName} 로 전환합니다.\n보드가 재부팅되어 적용됩니다.");
+            }
+            else if (result == "FAILED")
+            {
+                MessageBox.Show(
+                    $"보드가 전환을 거절했습니다 ({targetName}).\n\n" +
+                    "대상 슬롯이 비어 있거나 내용이 일치하지 않습니다.\n" +
+                    "보드는 그대로 동작 중이니 안전합니다 — 로그를 확인하세요.");
+            }
+            else
+            {
+                MessageBox.Show("응답이 없습니다 — 연결 상태와 로그를 확인하세요.");
+            }
+        }
+
+        /// <summary>슬롯 전환 명령 송신 + 응답 대기 (백그라운드 스레드).</summary>
+        private string SendSlotSwitch(string command, byte[] header, IFwLink link)
+        {
+            link.PauseAsyncRx();
+            try
+            {
+                link.ReadTimeout = 5000;
+                link.DiscardInBuffer();
+
+                link.Write(command);
+                if (header != null) link.Write(header, 0, header.Length);
+                AppendLog($"[TX] {command}\r\n");
+
+                // MCU는 재부팅 전에 대상 슬롯을 검증하므로 응답까지 잠깐 걸릴 수 있다.
+                string res = WaitForAnyText(new[] { "DONE", "FAILED" }, 5000, link);
+                AppendLog($"[RX] {res ?? "(무응답)"}\r\n");
+                return res;
+            }
+            catch (TimeoutException) { AppendLog("[ERR] 타임아웃\r\n"); return null; }
+            catch (Exception ex) { AppendLog("[ERR] " + ex.Message + "\r\n"); return null; }
+            finally
+            {
+                link.ResumeAsyncRx();
+            }
+        }
+
+        /// <summary>
+        /// 두 다운로드 버튼의 공통 처리: 링크 선택 → 전송 → 뒷정리.
+        /// </summary>
+        /// <param name="command">MCU에 보낼 8바이트 명령("FWUPDATE" 또는 "FWFACTRY")</param>
+        /// <param name="targetName">사용자 안내용 대상 이름</param>
+        /// <param name="boardReboots">
+        /// 전송 성공 후 보드가 재부팅하는지 여부. Staging(정상 OTA)은 재부팅하므로 TCP 연결이
+        /// 끊기지만, Factory 교체는 재부팅하지 않으므로 연결을 그대로 유지해야 한다.
+        /// </param>
+        private async Task RunFirmwareTransfer(byte[] image, string command, string targetName, bool boardReboots)
+        {
+            bool eth = RBtn_TransMode_Ethernet.Checked;
+
+            IFwLink link;
+            if (eth)
+            {
+                if (_tcp == null || !_tcp.IsConnected)
+                {
+                    MessageBox.Show("먼저 Socket Connect로 보드에 연결하세요.");
+                    return;
+                }
+                link = _tcp;
+            }
+            else
+            {
+                if (!_serial.IsOpen)
+                {
+                    MessageBox.Show("먼저 COM 포트를 여세요 (OPEN).");
+                    return;
+                }
+                link = _serialLink;
+            }
+
+            if (image == null)
+            {
+                MessageBox.Show($"먼저 {targetName} 쪽 [open] 버튼으로 펌웨어 파일을 선택하세요.");
                 return;
             }
 
             SetTransferUi(true);
-            bool ok = await Task.Run(() => SendFirmwareSequence(_fwImage, link));
+            bool ok = await Task.Run(() => SendFirmwareSequence(image, link, command));
             SetTransferUi(false);
 
-            // Ethernet: 전송 후 보드가 재부팅(성공) 또는 정지(실패)하므로 연결이 유효하지 않다 → 정리.
-            if (eth)
+            // Ethernet + 보드가 재부팅하는 경우에만 연결을 정리한다.
+            // (Factory 교체는 보드가 계속 돌고 있으므로 소켓을 그대로 두어야 재접속 없이 이어서 쓸 수 있다)
+            if (eth && boardReboots)
             {
                 _tcp?.Dispose();
                 _tcp = null;
@@ -258,11 +452,27 @@ namespace UI_Monitor
                 if (ok) AppendLog("[i] 보드 재부팅 중 — 다시 전송하려면 재접속(Connect) 하세요.\r\n");
             }
 
-            MessageBox.Show(ok ? "펌웨어 전송 완료! (Staging에 저장됨)" : "펌웨어 전송 실패 — 로그를 확인하세요.");
+            if (ok)
+            {
+                MessageBox.Show(boardReboots
+                    ? $"펌웨어 전송 완료! ({targetName}에 저장 → 보드가 재부팅되어 적용됩니다)"
+                    : $"{targetName} 이미지 교체 완료! (재부팅 없음 — 롤백 시 이 이미지로 복구됩니다)");
+            }
+            else
+            {
+                MessageBox.Show($"{targetName} 전송 실패 — 로그를 확인하세요.");
+            }
         }
 
-        /// <summary>프로토콜에 따라 펌웨어를 전송한다 (백그라운드 스레드). 전송 계층은 link로 추상화.</summary>
-        private bool SendFirmwareSequence(byte[] image, IFwLink link)
+        /// <summary>
+        /// 프로토콜에 따라 펌웨어를 전송한다 (백그라운드 스레드). 전송 계층은 link로 추상화.
+        /// </summary>
+        /// <param name="command">
+        /// 대상 슬롯을 정하는 8바이트 명령. 프로토콜 본문은 완전히 동일하고 MCU가 기록 위치만 바꾼다.
+        ///   "FWUPDATE" → Staging (정상 OTA: 적용 후 보드가 재부팅)
+        ///   "FWFACTRY" → Factory (골든 이미지 교체: 재부팅 없음)
+        /// </param>
+        private bool SendFirmwareSequence(byte[] image, IFwLink link, string command)
         {
             const byte ACK = 0x79, NACK = 0x1F;
             const int CHUNK = 256;
@@ -273,9 +483,9 @@ namespace UI_Monitor
                 link.ReadTimeout = 10000;                  // erase가 오래 걸릴 수 있어 넉넉히
                 link.DiscardInBuffer();
 
-                // 1) FWUPDATE 전송
-                link.Write("FWUPDATE");
-                AppendLog("[TX] FWUPDATE\r\n");
+                // 1) 명령 전송 (대상 슬롯 결정)
+                link.Write(command);
+                AppendLog($"[TX] {command}\r\n");
 
                 // 2) READY 대기
                 if (!WaitForText("READY", 3000, link))
@@ -470,6 +680,9 @@ namespace UI_Monitor
             if (InvokeRequired) { BeginInvoke(new Action(() => SetTransferUi(active))); return; }
             Btn_FW_Open.Enabled = !active;
             Btn_FW_Download.Enabled = !active;
+            Btn_FACTORY_Open.Enabled = !active;
+            Btn_FACTORY_Download.Enabled = !active;
+            Btn_ToFACTORY.Enabled = !active;
             Btn_COMOPEN.Enabled = !active && !_serial.IsOpen;
             Btn_COMCLOSE.Enabled = !active && _serial.IsOpen;
 
@@ -477,7 +690,58 @@ namespace UI_Monitor
             Btn_SOCKETConnect.Enabled = !active && !tcpConn;
             Btn_SOCKETDisconnect.Enabled = !active && tcpConn;
 
+            // 전송 중에는 상태 폴링을 멈춘다. 폴링과 OTA는 같은 소켓을 쓰므로 겹치면
+            // 청크/ACK 스트림에 FWINFO?? 요청이 끼어들어 전송이 깨진다.
+            // (이 메서드는 Task.Run으로 전송을 시작하기 '전에' UI 스레드에서 불리고,
+            //  타이머 Tick도 UI 스레드라 서로 끼어들 수 없다 → 경합 없음)
+            if (active) _infoTimer.Stop();
+            else if (tcpConn) _infoTimer.Start();
+
             if (!active) TStripProBar_SendState.Value = 0;
+        }
+
+        // ============================================================
+        //  상태 폴링 (Ethernet 전용)
+        //
+        //  RS-232는 보드가 1초마다 배너를 스스로 뿜으므로 뷰어에 그대로 쌓인다.
+        //  TCP는 보드가 자발적으로 보내면 OTA 청크 스트림에 끼어들어 프로토콜이 깨지므로,
+        //  '요청이 있을 때만' 응답하게 하고 폴링 주기는 PC가 쥔다. 화면상 결과는 동일하다.
+        // ============================================================
+
+        /// <summary>보드에 FWINFO??를 보내 상태 한 줄을 받아 뷰어에 출력한다.</summary>
+        private void PollFirmwareInfo()
+        {
+            var link = _tcp;
+            if (link == null || !link.IsConnected) { _infoTimer.Stop(); return; }
+
+            try
+            {
+                link.DiscardInBuffer();
+                link.ReadTimeout = 300;      // 보드는 즉답한다. UI 스레드를 오래 잡지 않는다.
+                link.Write("FWINFO??");
+
+                var sb = new StringBuilder(96);
+                for (int i = 0; i < 128; i++)
+                {
+                    int b = link.ReadByte();
+                    if (b == '\n') break;
+                    if (b != '\r') sb.Append((char)b);
+                }
+                if (sb.Length > 0) AppendLog(sb.ToString() + "\r\n");
+            }
+            catch (TimeoutException)
+            {
+                // 응답 없음 — 이번 주기는 건너뛴다. 보드가 바쁠 수 있으므로 연결은 유지.
+            }
+            catch (Exception ex)
+            {
+                // 소켓이 끊긴 경우 — 폴링을 멈추고 연결 상태를 실제와 맞춘다.
+                AppendLog("[ERR] 상태 조회 실패: " + ex.Message + "\r\n");
+                _infoTimer.Stop();
+                _tcp?.Dispose();
+                _tcp = null;
+                UpdateSocketConnState(false);
+            }
         }
 
         // ============================================================
@@ -500,6 +764,9 @@ namespace UI_Monitor
             {
                 _tcp = new TcpLink(ip, port);
                 UpdateSocketConnState(true);
+
+                PollFirmwareInfo();      // 접속 직후 1회 — 첫 표시까지 1초를 기다리지 않도록
+                _infoTimer.Start();
                 AppendLog($"[CONNECT] {ip}:{port} 연결됨\r\n");
             }
             catch (Exception ex)
@@ -514,6 +781,7 @@ namespace UI_Monitor
         /// <summary>Disconnect 버튼: TCP 연결을 닫는다.</summary>
         private void Btn_SOCKETDisconnect_Click(object sender, EventArgs e)
         {
+            _infoTimer.Stop();
             _tcp?.Dispose();
             _tcp = null;
             UpdateSocketConnState(false);

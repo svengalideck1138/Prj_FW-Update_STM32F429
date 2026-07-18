@@ -1,0 +1,24 @@
+# ============================================================
+#  GitHub Linguist 언어 통계 보정
+#  ST/CubeMX가 생성한 드라이버·미들웨어(수 MB의 C)가 통계를 독식해
+#  직접 작성한 코드(C / C#)가 묻히는 것을 방지한다.
+#  → 저장소 내용에는 영향 없고, 언어 비율 표시에만 반영된다.
+# ============================================================
+
+# ST HAL + CMSIS 드라이버 (CubeMX 생성, 서드파티)
+FW_BOOT/Drivers/**   linguist-vendored
+FW_APP/Drivers/**    linguist-vendored
+
+# lwIP 미들웨어 (CubeMX 생성, 서드파티)
+FW_APP/LWIP/**       linguist-vendored
+
+# CubeMX 생성 스타트업 어셈블리
+FW_BOOT/Core/Startup/**  linguist-generated
+FW_APP/Core/Startup/**   linguist-generated
+
+# 순수 자동 생성 보일러플레이트 (resx/settings 툴 산출물)
+UI_Monitor/Properties/Resources.Designer.cs  linguist-generated
+UI_Monitor/Properties/Settings.Designer.cs   linguist-generated
+
+# 참고: Form1.Designer.cs는 통계에 포함한다.
+#       디자이너가 생성한 파일이지만 화면 구성(컨트롤 배치/속성)은 직접 작업한 결과물이므로.

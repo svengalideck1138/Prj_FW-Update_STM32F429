@@ -79,6 +79,14 @@
             this.label2 = new System.Windows.Forms.Label();
             this.groupBox_FWUpdate = new System.Windows.Forms.GroupBox();
             this.Btn_FW_Download = new System.Windows.Forms.Button();
+            this.Btn_FACTORY_Download = new System.Windows.Forms.Button();
+            this.label1 = new System.Windows.Forms.Label();
+            this.label3 = new System.Windows.Forms.Label();
+            this.textBox_FACTORY_FIle = new System.Windows.Forms.TextBox();
+            this.Btn_FACTORY_Open = new System.Windows.Forms.Button();
+            this.textBox_FACT_Address = new System.Windows.Forms.TextBox();
+            this.textBox_APP_Address = new System.Windows.Forms.TextBox();
+            this.Btn_ToFACTORY = new System.Windows.Forms.Button();
             this.GroupBox_TransferMode.SuspendLayout();
             this.GroupBox_ComportSetting.SuspendLayout();
             this.GroupBox_SocketSetting.SuspendLayout();
@@ -499,9 +507,9 @@
             this.GroupBox_ViewerRS232.Controls.Add(this.Btn_Clear_RS232Log);
             this.GroupBox_ViewerRS232.Controls.Add(this.Tbox_RS232_ReceivedLog);
             this.GroupBox_ViewerRS232.Font = new System.Drawing.Font("Gulim", 9F, ((System.Drawing.FontStyle)((System.Drawing.FontStyle.Bold | System.Drawing.FontStyle.Underline))));
-            this.GroupBox_ViewerRS232.Location = new System.Drawing.Point(172, 122);
+            this.GroupBox_ViewerRS232.Location = new System.Drawing.Point(172, 166);
             this.GroupBox_ViewerRS232.Name = "GroupBox_ViewerRS232";
-            this.GroupBox_ViewerRS232.Size = new System.Drawing.Size(617, 273);
+            this.GroupBox_ViewerRS232.Size = new System.Drawing.Size(617, 229);
             this.GroupBox_ViewerRS232.TabIndex = 46;
             this.GroupBox_ViewerRS232.TabStop = false;
             this.GroupBox_ViewerRS232.Text = "Received Viewer(RS-232)";
@@ -555,7 +563,7 @@
             this.Tbox_RS232_ReceivedLog.Multiline = true;
             this.Tbox_RS232_ReceivedLog.Name = "Tbox_RS232_ReceivedLog";
             this.Tbox_RS232_ReceivedLog.ScrollBars = System.Windows.Forms.ScrollBars.Vertical;
-            this.Tbox_RS232_ReceivedLog.Size = new System.Drawing.Size(609, 220);
+            this.Tbox_RS232_ReceivedLog.Size = new System.Drawing.Size(609, 176);
             this.Tbox_RS232_ReceivedLog.TabIndex = 27;
             // 
             // GroupBox_ViewerEthernet
@@ -568,9 +576,9 @@
             this.GroupBox_ViewerEthernet.Controls.Add(this.Btn_Clear_EthernetLog);
             this.GroupBox_ViewerEthernet.Controls.Add(this.Tbox_Ethernet_ReceivedLog);
             this.GroupBox_ViewerEthernet.Font = new System.Drawing.Font("Gulim", 9F, ((System.Drawing.FontStyle)((System.Drawing.FontStyle.Bold | System.Drawing.FontStyle.Underline))));
-            this.GroupBox_ViewerEthernet.Location = new System.Drawing.Point(172, 130);
+            this.GroupBox_ViewerEthernet.Location = new System.Drawing.Point(172, 166);
             this.GroupBox_ViewerEthernet.Name = "GroupBox_ViewerEthernet";
-            this.GroupBox_ViewerEthernet.Size = new System.Drawing.Size(617, 265);
+            this.GroupBox_ViewerEthernet.Size = new System.Drawing.Size(617, 229);
             this.GroupBox_ViewerEthernet.TabIndex = 47;
             this.GroupBox_ViewerEthernet.TabStop = false;
             this.GroupBox_ViewerEthernet.Text = "Received Viewer(Ethernet)";
@@ -625,13 +633,13 @@
             this.Tbox_Ethernet_ReceivedLog.Multiline = true;
             this.Tbox_Ethernet_ReceivedLog.Name = "Tbox_Ethernet_ReceivedLog";
             this.Tbox_Ethernet_ReceivedLog.ScrollBars = System.Windows.Forms.ScrollBars.Vertical;
-            this.Tbox_Ethernet_ReceivedLog.Size = new System.Drawing.Size(609, 212);
+            this.Tbox_Ethernet_ReceivedLog.Size = new System.Drawing.Size(609, 176);
             this.Tbox_Ethernet_ReceivedLog.TabIndex = 27;
             // 
             // Btn_FW_Open
             // 
             this.Btn_FW_Open.Font = new System.Drawing.Font("Gulim", 9F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
-            this.Btn_FW_Open.Location = new System.Drawing.Point(530, 24);
+            this.Btn_FW_Open.Location = new System.Drawing.Point(377, 72);
             this.Btn_FW_Open.Name = "Btn_FW_Open";
             this.Btn_FW_Open.Size = new System.Drawing.Size(75, 23);
             this.Btn_FW_Open.TabIndex = 48;
@@ -641,16 +649,16 @@
             // textBox_FW_FIle
             // 
             this.textBox_FW_FIle.Font = new System.Drawing.Font("Gulim", 9F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
-            this.textBox_FW_FIle.Location = new System.Drawing.Point(69, 26);
+            this.textBox_FW_FIle.Location = new System.Drawing.Point(189, 73);
             this.textBox_FW_FIle.Name = "textBox_FW_FIle";
-            this.textBox_FW_FIle.Size = new System.Drawing.Size(455, 21);
+            this.textBox_FW_FIle.Size = new System.Drawing.Size(182, 21);
             this.textBox_FW_FIle.TabIndex = 49;
             // 
             // label_FW_Size
             // 
             this.label_FW_Size.AutoSize = true;
             this.label_FW_Size.Font = new System.Drawing.Font("Gulim", 9F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
-            this.label_FW_Size.Location = new System.Drawing.Point(7, 54);
+            this.label_FW_Size.Location = new System.Drawing.Point(13, 100);
             this.label_FW_Size.Name = "label_FW_Size";
             this.label_FW_Size.Size = new System.Drawing.Size(36, 12);
             this.label_FW_Size.TabIndex = 50;
@@ -660,7 +668,7 @@
             // 
             this.label2.AutoSize = true;
             this.label2.Font = new System.Drawing.Font("Microsoft Sans Serif", 8.25F, System.Drawing.FontStyle.Bold, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
-            this.label2.Location = new System.Drawing.Point(6, 30);
+            this.label2.Location = new System.Drawing.Point(12, 77);
             this.label2.Name = "label2";
             this.label2.Size = new System.Drawing.Size(57, 13);
             this.label2.TabIndex = 51;
@@ -671,6 +679,14 @@
             this.groupBox_FWUpdate.Anchor = ((System.Windows.Forms.AnchorStyles)((((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Bottom) 
             | System.Windows.Forms.AnchorStyles.Left) 
             | System.Windows.Forms.AnchorStyles.Right)));
+            this.groupBox_FWUpdate.Controls.Add(this.Btn_ToFACTORY);
+            this.groupBox_FWUpdate.Controls.Add(this.textBox_APP_Address);
+            this.groupBox_FWUpdate.Controls.Add(this.textBox_FACT_Address);
+            this.groupBox_FWUpdate.Controls.Add(this.Btn_FACTORY_Download);
+            this.groupBox_FWUpdate.Controls.Add(this.label1);
+            this.groupBox_FWUpdate.Controls.Add(this.label3);
+            this.groupBox_FWUpdate.Controls.Add(this.textBox_FACTORY_FIle);
+            this.groupBox_FWUpdate.Controls.Add(this.Btn_FACTORY_Open);
             this.groupBox_FWUpdate.Controls.Add(this.Btn_FW_Download);
             this.groupBox_FWUpdate.Controls.Add(this.label2);
             this.groupBox_FWUpdate.Controls.Add(this.label_FW_Size);
@@ -679,7 +695,7 @@
             this.groupBox_FWUpdate.Font = new System.Drawing.Font("Gulim", 9F, ((System.Drawing.FontStyle)((System.Drawing.FontStyle.Bold | System.Drawing.FontStyle.Underline))));
             this.groupBox_FWUpdate.Location = new System.Drawing.Point(172, 12);
             this.groupBox_FWUpdate.Name = "groupBox_FWUpdate";
-            this.groupBox_FWUpdate.Size = new System.Drawing.Size(617, 97);
+            this.groupBox_FWUpdate.Size = new System.Drawing.Size(617, 148);
             this.groupBox_FWUpdate.TabIndex = 48;
             this.groupBox_FWUpdate.TabStop = false;
             this.groupBox_FWUpdate.Text = "Firmware Update";
@@ -687,12 +703,88 @@
             // Btn_FW_Download
             // 
             this.Btn_FW_Download.Font = new System.Drawing.Font("Gulim", 9F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
-            this.Btn_FW_Download.Location = new System.Drawing.Point(69, 49);
+            this.Btn_FW_Download.Location = new System.Drawing.Point(458, 72);
             this.Btn_FW_Download.Name = "Btn_FW_Download";
-            this.Btn_FW_Download.Size = new System.Drawing.Size(536, 23);
+            this.Btn_FW_Download.Size = new System.Drawing.Size(144, 23);
             this.Btn_FW_Download.TabIndex = 52;
             this.Btn_FW_Download.Text = "F/W Download";
             this.Btn_FW_Download.UseVisualStyleBackColor = true;
+            // 
+            // Btn_FACTORY_Download
+            // 
+            this.Btn_FACTORY_Download.Font = new System.Drawing.Font("Gulim", 9F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
+            this.Btn_FACTORY_Download.Location = new System.Drawing.Point(458, 18);
+            this.Btn_FACTORY_Download.Name = "Btn_FACTORY_Download";
+            this.Btn_FACTORY_Download.Size = new System.Drawing.Size(144, 23);
+            this.Btn_FACTORY_Download.TabIndex = 57;
+            this.Btn_FACTORY_Download.Text = "FACTORY Download";
+            this.Btn_FACTORY_Download.UseVisualStyleBackColor = true;
+            // 
+            // label1
+            // 
+            this.label1.AutoSize = true;
+            this.label1.Font = new System.Drawing.Font("Microsoft Sans Serif", 8.25F, System.Drawing.FontStyle.Bold, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
+            this.label1.Location = new System.Drawing.Point(12, 23);
+            this.label1.Name = "label1";
+            this.label1.Size = new System.Drawing.Size(64, 13);
+            this.label1.TabIndex = 56;
+            this.label1.Text = "FACTORY";
+            // 
+            // label3
+            // 
+            this.label3.AutoSize = true;
+            this.label3.Font = new System.Drawing.Font("Gulim", 9F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
+            this.label3.Location = new System.Drawing.Point(13, 46);
+            this.label3.Name = "label3";
+            this.label3.Size = new System.Drawing.Size(36, 12);
+            this.label3.TabIndex = 55;
+            this.label3.Text = "0Byte";
+            // 
+            // textBox_FACTORY_FIle
+            // 
+            this.textBox_FACTORY_FIle.Font = new System.Drawing.Font("Gulim", 9F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
+            this.textBox_FACTORY_FIle.Location = new System.Drawing.Point(189, 19);
+            this.textBox_FACTORY_FIle.Name = "textBox_FACTORY_FIle";
+            this.textBox_FACTORY_FIle.Size = new System.Drawing.Size(182, 21);
+            this.textBox_FACTORY_FIle.TabIndex = 54;
+            // 
+            // Btn_FACTORY_Open
+            // 
+            this.Btn_FACTORY_Open.Font = new System.Drawing.Font("Gulim", 9F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
+            this.Btn_FACTORY_Open.Location = new System.Drawing.Point(377, 18);
+            this.Btn_FACTORY_Open.Name = "Btn_FACTORY_Open";
+            this.Btn_FACTORY_Open.Size = new System.Drawing.Size(75, 23);
+            this.Btn_FACTORY_Open.TabIndex = 53;
+            this.Btn_FACTORY_Open.Text = "open";
+            this.Btn_FACTORY_Open.UseVisualStyleBackColor = true;
+            // 
+            // textBox_FACT_Address
+            // 
+            this.textBox_FACT_Address.Enabled = false;
+            this.textBox_FACT_Address.Font = new System.Drawing.Font("Gulim", 9F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
+            this.textBox_FACT_Address.Location = new System.Drawing.Point(82, 19);
+            this.textBox_FACT_Address.Name = "textBox_FACT_Address";
+            this.textBox_FACT_Address.Size = new System.Drawing.Size(101, 21);
+            this.textBox_FACT_Address.TabIndex = 58;
+            // 
+            // textBox_APP_Address
+            // 
+            this.textBox_APP_Address.Enabled = false;
+            this.textBox_APP_Address.Font = new System.Drawing.Font("Gulim", 9F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
+            this.textBox_APP_Address.Location = new System.Drawing.Point(82, 73);
+            this.textBox_APP_Address.Name = "textBox_APP_Address";
+            this.textBox_APP_Address.Size = new System.Drawing.Size(101, 21);
+            this.textBox_APP_Address.TabIndex = 59;
+            // 
+            // Btn_ToFACTORY
+            // 
+            this.Btn_ToFACTORY.Font = new System.Drawing.Font("Gulim", 9F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
+            this.Btn_ToFACTORY.Location = new System.Drawing.Point(5, 116);
+            this.Btn_ToFACTORY.Name = "Btn_ToFACTORY";
+            this.Btn_ToFACTORY.Size = new System.Drawing.Size(300, 23);
+            this.Btn_ToFACTORY.TabIndex = 60;
+            this.Btn_ToFACTORY.Text = "FACTORY WORK";
+            this.Btn_ToFACTORY.UseVisualStyleBackColor = true;
             // 
             // Form1
             // 
@@ -700,11 +792,11 @@
             this.AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font;
             this.ClientSize = new System.Drawing.Size(800, 427);
             this.Controls.Add(this.groupBox_FWUpdate);
-            this.Controls.Add(this.GroupBox_ViewerRS232);
             this.Controls.Add(this.StatusStrip1);
             this.Controls.Add(this.GroupBox_SocketSetting);
             this.Controls.Add(this.GroupBox_ComportSetting);
             this.Controls.Add(this.GroupBox_TransferMode);
+            this.Controls.Add(this.GroupBox_ViewerRS232);
             this.Controls.Add(this.GroupBox_ViewerEthernet);
             this.Name = "Form1";
             this.Text = "Form1";
@@ -779,6 +871,14 @@
         private System.Windows.Forms.Label label2;
         private System.Windows.Forms.GroupBox groupBox_FWUpdate;
         private System.Windows.Forms.Button Btn_FW_Download;
+        private System.Windows.Forms.TextBox textBox_APP_Address;
+        private System.Windows.Forms.TextBox textBox_FACT_Address;
+        private System.Windows.Forms.Button Btn_FACTORY_Download;
+        private System.Windows.Forms.Label label1;
+        private System.Windows.Forms.Label label3;
+        private System.Windows.Forms.TextBox textBox_FACTORY_FIle;
+        private System.Windows.Forms.Button Btn_FACTORY_Open;
+        private System.Windows.Forms.Button Btn_ToFACTORY;
     }
 }
 

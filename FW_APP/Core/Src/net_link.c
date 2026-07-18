@@ -1,246 +1,225 @@
 /**
   ******************************************************************************
   * @file    net_link.c
-  * @brief   lwIP RAW TCP(NO_SYS) 기반 블로킹 전송 링크 + RX 링버퍼.
+  * @brief   TCP 링크 (BSD 소켓). 설계 배경은 net_link.h 참고.
   *
-  *  구조:
-  *   - TCP 서버로 NETLINK_PORT를 리슨, 한 번에 한 클라이언트만 수용.
-  *   - recv 콜백이 도착 payload를 RX 링버퍼에 적재(전량 안 들어가면 ERR_MEM로 백프레셔).
-  *   - NetLink_Recv/Send는 링버퍼/tcp_write 위에서 "정확 길이" 블로킹 I/O를 제공하며,
-  *     대기 중 lwIP를 계속 펌핑하고 워치독을 갱신한다(플래시/전송 중 리셋 방지).
-  *
-  *  주의(NO_SYS): recv 콜백과 소비(Recv/ReadAvailable)는 모두 MX_LWIP_Process()
-  *  컨텍스트(메인 루프 단일 스레드)에서만 실행된다. 인터럽트에서 링버퍼를 만지지
-  *  않으므로 별도 락/volatile이 필요 없다.
+  *  주의: lwipopts에서 LWIP_PROVIDE_ERRNO가 켜져 있어 lwIP가 errno와 E* 상수를 직접
+  *        제공한다. 따라서 <errno.h>를 include하면 안 된다(중복 정의 충돌).
   ******************************************************************************
   */
 #include "net_link.h"
-#include "main.h"          /* HAL, IWDG, HAL_GetTick */
-#include "lwip.h"          /* MX_LWIP_Process */
-#include "lwip/tcp.h"
-#include "lwip/pbuf.h"
+#include "main.h"
 
-/* ===== RX 링버퍼 (크기는 반드시 2의 거듭제곱: 인덱스 마스킹 사용) ===== */
-#define RX_RING_SIZE   4096U          /* TCP 윈도우(기본 ~2KB) 이상 → 한 윈도우 전량 흡수 */
-#if (RX_RING_SIZE & (RX_RING_SIZE - 1U)) != 0U
-#error "RX_RING_SIZE must be a power of two"
-#endif
+#include "lwip/opt.h"
+#include "lwip/sockets.h"
 
-static uint8_t  s_rx[RX_RING_SIZE];
-static uint32_t s_head;                /* 누적 write 인덱스 (recv 콜백) */
-static uint32_t s_tail;                /* 누적 read 인덱스 (소비) */
+#include "FreeRTOS.h"
+#include "task.h"
 
-static struct tcp_pcb *s_client;       /* 현재 연결 pcb */
-static struct tcp_pcb *s_listen;       /* 리슨 pcb */
-static bool            s_connected;
+#include <string.h>
 
-/* --- 링버퍼 헬퍼 (32bit 언랩 뺄셈: count는 항상 <= RX_RING_SIZE) --- */
-static uint32_t ring_count(void) { return s_head - s_tail; }
-static uint32_t ring_free(void)  { return RX_RING_SIZE - ring_count(); }
-static void     ring_reset(void) { s_head = 0U; s_tail = 0U; }
+/* 송신이 이 시간 안에 진행되지 않으면 실패로 본다(상대가 죽은 경우 무한 대기 방지). */
+#define NETLINK_TX_TIMEOUT_MS   5000U
 
-static void ring_write(const uint8_t *d, uint32_t n)
+/* 무한 대기(timeoutMs==0)일 때 recv를 끊어 기다리는 단위.
+ * 한 번에 영원히 블록하지 않고 주기적으로 깨어나 연결 상태를 재확인하기 위함. */
+#define NETLINK_WAIT_SLICE_MS   1000U
+
+static int s_listenFd = -1;
+static int s_clientFd = -1;
+
+/* lwIP는 LWIP_SO_SNDRCVTIMEO_NONSTANDARD=0(기본)에서 struct timeval을 받는다. */
+static void netlink_set_timeout(int fd, int optname, uint32_t ms)
 {
-  for (uint32_t i = 0U; i < n; i++)
-  {
-    s_rx[s_head & (RX_RING_SIZE - 1U)] = d[i];
-    s_head++;
-  }
+  struct timeval tv;
+  tv.tv_sec  = (long)(ms / 1000U);
+  tv.tv_usec = (long)((ms % 1000U) * 1000U);
+  (void)lwip_setsockopt(fd, SOL_SOCKET, optname, &tv, sizeof(tv));
 }
 
-static uint32_t ring_read(uint8_t *d, uint32_t max)
+/* recv/send가 '타임아웃'으로 실패했는지(=재시도 가능) 판별 */
+static bool netlink_would_block(void)
 {
-  uint32_t n = ring_count();
-  if (n > max) n = max;
-  for (uint32_t i = 0U; i < n; i++)
-  {
-    d[i] = s_rx[s_tail & (RX_RING_SIZE - 1U)];
-    s_tail++;
-  }
-  return n;
+  return (errno == EWOULDBLOCK) || (errno == EAGAIN);
 }
-
-/* --- 워치독 갱신(펫). IWDG 미가동 시엔 무해한 no-op. --- */
-static inline void netlink_pet(void) { IWDG->KR = 0x0000AAAAU; }
-
-static void netlink_reset_conn(void)
-{
-  s_client    = NULL;
-  s_connected = false;
-  ring_reset();
-}
-
-/* ===== lwIP RAW 콜백 ===== */
-
-static err_t netlink_recv_cb(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err)
-{
-  (void)arg;
-
-  if (err != ERR_OK)
-  {
-    if (p != NULL) pbuf_free(p);
-    return err;
-  }
-
-  if (p == NULL)                 /* 원격이 연결을 정상 종료 */
-  {
-    tcp_recv(tpcb, NULL);
-    tcp_err(tpcb, NULL);
-    tcp_close(tpcb);
-    netlink_reset_conn();
-    return ERR_OK;
-  }
-
-  /* 링버퍼에 '전량' 들어갈 때만 수용. 부족하면 ERR_MEM → lwIP가 pbuf를 보관했다
-   * 나중에 재전달(백프레셔). RX_RING_SIZE >= TCP 윈도우이므로 소비만 되면 곧 수용됨. */
-  if (ring_free() < p->tot_len)
-  {
-    return ERR_MEM;
-  }
-
-  for (struct pbuf *q = p; q != NULL; q = q->next)
-  {
-    ring_write((const uint8_t *)q->payload, q->len);
-  }
-  tcp_recved(tpcb, p->tot_len);      /* 수신 윈도우 전진 */
-  pbuf_free(p);
-  return ERR_OK;
-}
-
-static void netlink_err_cb(void *arg, err_t err)
-{
-  (void)arg;
-  (void)err;
-  /* 이 콜백 시점에 pcb는 이미 lwIP가 해제함 → close/abort 호출 금지. 상태만 정리. */
-  netlink_reset_conn();
-}
-
-static err_t netlink_accept_cb(void *arg, struct tcp_pcb *newpcb, err_t err)
-{
-  (void)arg;
-  if (err != ERR_OK || newpcb == NULL) return ERR_VAL;
-
-  if (s_connected)                   /* 이미 세션 있음 → 새 연결 거부 */
-  {
-    return ERR_MEM;
-  }
-
-  s_client    = newpcb;
-  s_connected = true;
-  ring_reset();
-
-  tcp_nagle_disable(newpcb);         /* 1바이트 ACK가 지연되지 않도록(저지연) */
-  tcp_recv(newpcb, netlink_recv_cb);
-  tcp_err(newpcb,  netlink_err_cb);
-  return ERR_OK;
-}
-
-/* ===== 공개 API ===== */
 
 void NetLink_Init(void)
 {
-  netlink_reset_conn();
-
-  struct tcp_pcb *pcb = tcp_new();
-  if (pcb == NULL) return;
-
-  if (tcp_bind(pcb, IP_ADDR_ANY, NETLINK_PORT) != ERR_OK)
-  {
-    tcp_close(pcb);
-    return;
-  }
-
-  s_listen = tcp_listen(pcb);        /* 성공 시 작은 리슨 pcb 반환 + 기존 pcb 해제 */
-  if (s_listen == NULL)
-  {
-    tcp_close(pcb);
-    return;
-  }
-  tcp_accept(s_listen, netlink_accept_cb);
+  s_listenFd = -1;
+  s_clientFd = -1;
 }
 
-void NetLink_Poll(void)
+bool NetLink_ServerOpen(void)
 {
-  MX_LWIP_Process();
+  struct sockaddr_in addr;
+
+  s_listenFd = lwip_socket(AF_INET, SOCK_STREAM, 0);
+  if (s_listenFd < 0) return false;
+
+  memset(&addr, 0, sizeof(addr));
+  addr.sin_family      = AF_INET;
+  addr.sin_port        = lwip_htons((uint16_t)NETLINK_PORT);
+  addr.sin_addr.s_addr = INADDR_ANY;
+
+  if (lwip_bind(s_listenFd, (struct sockaddr *)&addr, sizeof(addr)) < 0)
+  {
+    (void)lwip_close(s_listenFd);
+    s_listenFd = -1;
+    return false;
+  }
+
+  /* 백로그 1: 한 번에 한 세션만 다룬다(OTA는 동시에 두 개가 돌면 안 된다). */
+  if (lwip_listen(s_listenFd, 1) < 0)
+  {
+    (void)lwip_close(s_listenFd);
+    s_listenFd = -1;
+    return false;
+  }
+
+  return true;
 }
 
-bool     NetLink_Connected(void)                          { return s_connected; }
-uint32_t NetLink_Available(void)                          { return ring_count(); }
-uint32_t NetLink_ReadAvailable(uint8_t *buf, uint32_t max){ return ring_read(buf, max); }
+bool NetLink_Accept(uint32_t timeoutMs)
+{
+  if (s_listenFd < 0) return false;
+  if (s_clientFd >= 0) return true;      /* 이미 세션 있음 */
+
+  /* accept도 SO_RCVTIMEO를 따른다 → 주기적으로 빠져나와 워치독 체크인을 할 수 있다. */
+  netlink_set_timeout(s_listenFd, SO_RCVTIMEO, timeoutMs);
+
+  struct sockaddr_in cli;
+  socklen_t          cliLen = sizeof(cli);
+
+  int fd = lwip_accept(s_listenFd, (struct sockaddr *)&cli, &cliLen);
+  if (fd < 0) return false;              /* 타임아웃이거나 오류 */
+
+  /* Nagle 비활성 (자세한 이유는 헤더 주석 참고) */
+  int one = 1;
+  (void)lwip_setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+
+  /* 송신이 영원히 막히지 않도록 상한을 둔다 */
+  netlink_set_timeout(fd, SO_SNDTIMEO, NETLINK_TX_TIMEOUT_MS);
+
+  s_clientFd = fd;
+  return true;
+}
+
+bool NetLink_Connected(void)
+{
+  return (s_clientFd >= 0);
+}
+
+void NetLink_CloseClient(void)
+{
+  if (s_clientFd >= 0)
+  {
+    (void)lwip_close(s_clientFd);
+    s_clientFd = -1;
+  }
+}
+
+int NetLink_RecvSome(uint8_t *buf, uint32_t maxLen, uint32_t timeoutMs)
+{
+  if ((s_clientFd < 0) || (buf == NULL) || (maxLen == 0U)) return -1;
+
+  netlink_set_timeout(s_clientFd, SO_RCVTIMEO,
+                      (timeoutMs == 0U) ? NETLINK_WAIT_SLICE_MS : timeoutMs);
+
+  int r = lwip_recv(s_clientFd, buf, (size_t)maxLen, 0);
+  if (r > 0) return r;
+
+  if (r == 0)                                     /* 상대가 정상 종료 */
+  {
+    NetLink_CloseClient();
+    return -1;
+  }
+  if (netlink_would_block()) return 0;            /* 단순 타임아웃 */
+
+  NetLink_CloseClient();                          /* 실제 오류 */
+  return -1;
+}
 
 bool NetLink_Recv(uint8_t *buf, uint32_t len, uint32_t timeoutMs)
 {
-  uint32_t got   = 0U;
-  uint32_t start = HAL_GetTick();
+  if ((s_clientFd < 0) || (buf == NULL)) return false;
+  if (len == 0U) return true;
+
+  uint32_t   got   = 0U;
+  TickType_t start = xTaskGetTickCount();
+  TickType_t total = pdMS_TO_TICKS(timeoutMs);
 
   while (got < len)
   {
-    got += ring_read(buf + got, len - got);
-    if (got >= len) break;
+    uint32_t sliceMs;
 
-    if (!s_connected && (ring_count() == 0U))     /* 끊겼고 버퍼도 비었음 */
+    if (timeoutMs == 0U)
     {
-      return false;
+      sliceMs = NETLINK_WAIT_SLICE_MS;            /* 무한 대기: 잘게 끊어 계속 기다린다 */
+    }
+    else
+    {
+      /* SO_RCVTIMEO는 '호출당' 타임아웃이지만 이 함수의 계약은 '총 데드라인'이다.
+       * 남은 시간을 매번 계산해 옵션을 줄여가며 맞춘다. */
+      TickType_t elapsed = xTaskGetTickCount() - start;   /* 언랩 안전 */
+      if (elapsed >= total) return false;
+      sliceMs = (uint32_t)((total - elapsed) * portTICK_PERIOD_MS);
+      if (sliceMs == 0U) sliceMs = 1U;
     }
 
-    netlink_pet();
-    NetLink_Poll();                               /* 새 패킷 수신 시도 */
+    netlink_set_timeout(s_clientFd, SO_RCVTIMEO, sliceMs);
 
-    if ((timeoutMs != 0U) && ((HAL_GetTick() - start) >= timeoutMs))
+    int r = lwip_recv(s_clientFd, buf + got, (size_t)(len - got), 0);
+    if (r > 0)
     {
+      got += (uint32_t)r;
+      continue;
+    }
+
+    /* 연결이 끝났거나 오류면 소켓을 닫아 NetLink_Connected()가 실제 상태를 반영하게 한다.
+     * 닫지 않으면 호출자가 '연결됨'으로 오인해 실패한 recv를 무한 반복한다. */
+    if (r == 0)
+    {
+      NetLink_CloseClient();                      /* 상대가 닫음 */
       return false;
     }
+    if (!netlink_would_block())
+    {
+      NetLink_CloseClient();                      /* 실제 오류 */
+      return false;
+    }
+    /* 타임아웃 → 루프 상단에서 데드라인을 다시 판정한다 */
   }
+
   return true;
 }
 
 bool NetLink_Send(const uint8_t *buf, uint32_t len)
 {
-  const uint32_t TX_TIMEOUT_MS = 5000U;
-  uint32_t off   = 0U;
-  uint32_t start = HAL_GetTick();
+  if ((s_clientFd < 0) || (buf == NULL)) return false;
+  if (len == 0U) return true;
+
+  uint32_t   off   = 0U;
+  TickType_t start = xTaskGetTickCount();
 
   while (off < len)
   {
-    if (!s_connected || (s_client == NULL)) return false;
-
-    uint32_t sndbuf = tcp_sndbuf(s_client);
-    if (sndbuf == 0U)                              /* 송신 버퍼 없음 → ACK 대기 */
+    int r = lwip_send(s_clientFd, buf + off, (size_t)(len - off), 0);
+    if (r > 0)
     {
-      netlink_pet();
-      NetLink_Poll();
-      if ((HAL_GetTick() - start) >= TX_TIMEOUT_MS) return false;
+      off  += (uint32_t)r;
+      start = xTaskGetTickCount();                /* 진행이 있었으니 타임아웃 리셋 */
+      continue;
+    }
+    if ((r < 0) && netlink_would_block())
+    {
+      /* 송신 버퍼가 찼다가 SO_SNDTIMEO가 만료된 경우 — 총 상한 안에서 재시도 */
+      if ((xTaskGetTickCount() - start) >= pdMS_TO_TICKS(NETLINK_TX_TIMEOUT_MS)) return false;
       continue;
     }
 
-    uint32_t chunk = (len - off < sndbuf) ? (len - off) : sndbuf;
-    err_t e = tcp_write(s_client, buf + off, (u16_t)chunk, TCP_WRITE_FLAG_COPY);
-    if (e == ERR_MEM)                              /* 힙 부족 → 잠시 펌핑 후 재시도 */
-    {
-      netlink_pet();
-      NetLink_Poll();
-      if ((HAL_GetTick() - start) >= TX_TIMEOUT_MS) return false;
-      continue;
-    }
-    if (e != ERR_OK) return false;
-
-    off += chunk;
-    tcp_output(s_client);                          /* 즉시 flush */
-    start = HAL_GetTick();                          /* 진행 있었으니 타임아웃 리셋 */
+    NetLink_CloseClient();     /* 상대가 닫혔거나 오류 — 상태를 실제와 맞춘다 */
+    return false;
   }
+
   return true;
-}
-
-void NetLink_Close(void)
-{
-  if (s_client != NULL)
-  {
-    tcp_recv(s_client, NULL);
-    tcp_err(s_client, NULL);
-    if (tcp_close(s_client) != ERR_OK)
-    {
-      tcp_abort(s_client);
-    }
-  }
-  netlink_reset_conn();
 }

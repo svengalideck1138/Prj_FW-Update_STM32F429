@@ -116,6 +116,8 @@ namespace UI_Monitor
             }
         }
 
+        /* 보드는 요청받았을 때만 응답한다(자발적 송신 없음) → 상시 리더가 필요 없다.
+         * 상태 표시는 Form1의 타이머가 FWINFO??를 폴링해 가져간다. */
         public void PauseAsyncRx()  { /* 비동기 수신 리더 없음 → no-op */ }
         public void ResumeAsyncRx() { /* no-op */ }
 

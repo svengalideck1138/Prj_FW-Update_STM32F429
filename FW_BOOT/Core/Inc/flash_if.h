@@ -79,6 +79,15 @@ typedef enum
 FlashIf_Status FlashIf_EraseRange(uint32_t startAddr, uint32_t endAddr);
 
 /**
+  * @brief  addr 가 속한 섹터의 '바로 다음 섹터 시작 주소'를 반환한다.
+  * @note   섹터를 하나씩 지우며 중간에 워치독을 갱신/양보하기 위한 것.
+  *         F429 섹터 크기는 불균일하다(16K×4 / 64K×1 / 128K×7, 뱅크마다 반복).
+  *         현재는 FW_APP의 Factory 기록 경로에서 사용한다(FW_BOOT에서는 미사용이지만
+  *         flash_if 는 두 프로젝트가 동일하게 유지되어야 하므로 함께 둔다).
+  */
+uint32_t FlashIf_NextSectorAddr(uint32_t addr);
+
+/**
   * @brief  애플리케이션 영역 전체(APP_ADDRESS~끝)를 지운다.
   */
 FlashIf_Status FlashIf_EraseApp(void);
