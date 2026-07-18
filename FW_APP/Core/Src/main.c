@@ -30,6 +30,7 @@
 #include "uart_link.h"
 #include "fw_info.h"
 #include "ota.h"             /* FwTransport/FwTarget + Ota_EnterDownloadMode/Ota_RequestRollback */
+#include "sys_info.h"        /* SysInfo_Report — 접속 시 보드/메모리 정보 조회 */
 #include <string.h>          /* 명령 매처의 memcmp/memset */
 /* USER CODE END Includes */
 
@@ -104,7 +105,10 @@ const osThreadAttr_t wdgTask_attributes = {
 osThreadId_t uartTaskHandle;
 const osThreadAttr_t uartTask_attributes = {
   .name       = "uartTask",
-  .stack_size = 2048,
+  /* 2048 → 2560. ota.c 분할로 호출 사슬이 깊어졌고(Ota_EnterDownloadMode → ota_run →
+   * ota_recv_chunks(buf[256]) → ota_recv_one_chunk), 여기에 SysInfo_Report까지 얹혔다.
+   * 실측(netTask)에서 여유가 356B(17%)까지 내려간 적이 있어 두 태스크를 함께 올린다. */
+  .stack_size = 2560,
   .priority   = (osPriority_t) osPriorityNormal,
 };
 
@@ -113,7 +117,9 @@ const osThreadAttr_t uartTask_attributes = {
 osThreadId_t netTaskHandle;
 const osThreadAttr_t netTask_attributes = {
   .name       = "netTask",
-  .stack_size = 2048,
+  /* 2048 → 2560. 실측 여유가 356B(17%)까지 내려갔다 — 다른 태스크(69~87%)에 비해
+   * 혼자 얇다. 원인은 ota.c 분할로 깊어진 호출 사슬. 자세한 건 uartTask 주석 참고. */
+  .stack_size = 2560,
   .priority   = (osPriority_t) osPriorityNormal,
 };
 
@@ -220,6 +226,20 @@ static uint32_t App_BuildStatusLine(char *dst, uint32_t cap)
 
   dst[n] = '\0';
   return n;
+}
+
+/* --- SysInfo 보고를 각 전송 계층으로 흘려보내는 어댑터 ---
+ * SysInfo_Report는 줄 단위 콜백으로 내보내므로, 큰 버퍼 없이 그대로 중계하면 된다. */
+static void App_SysInfoToUart(void *ctx, const char *line)
+{
+  (void)ctx;
+  Dbg_Puts(line);                    /* 호출자가 s_uartTxMutex를 쥔 상태여야 한다 */
+}
+
+static void App_SysInfoToTcp(void *ctx, const char *line)
+{
+  (void)ctx;
+  (void)NetLink_Send((const uint8_t *)line, (uint32_t)strlen(line));
 }
 
 /**
@@ -345,7 +365,7 @@ int main(void)
      * 버전 문자열(FW_App01 등)은 기능이 추가돼도 그대로라, 보드에 올라간 이미지가
      * 새 명령을 아는지 알 수 없다. 목록을 찍어두면 UI가 무응답일 때
      * '펌웨어가 구버전이라 명령을 모르는 것'을 즉시 구분할 수 있다. */
-    Dbg_Puts("[FW] cmds=FWUPDATE,FWFACTRY,FWROLLBK\r\n");
+    Dbg_Puts("[FW] cmds=FWUPDATE,FWFACTRY,FWROLLBK,FWSYS???\r\n");
 
     Dbg_Puts("[APP] boot  magic=");
     Dbg_PutHex32(m->magic);
@@ -844,6 +864,8 @@ static void StartUartTask(void *argument)
   static const char CMD_STAGING[8]  = { 'F','W','U','P','D','A','T','E' };
   static const char CMD_FACTORY[8]  = { 'F','W','F','A','C','T','R','Y' };
   static const char CMD_ROLLBACK[8] = { 'F','W','R','O','L','L','B','K' };
+  /* 보드/메모리 정보 조회 — 데이터 없이 여러 줄 응답만 돌려준다. */
+  static const char CMD_SYSINFO[8]  = { 'F','W','S','Y','S','?','?','?' };
   uint8_t win[8] = {0};
 
   if (!UartLink_Init())
@@ -869,6 +891,21 @@ static void StartUartTask(void *argument)
     bool isStaging  = (memcmp(win, CMD_STAGING,  8) == 0);
     bool isFactory  = (memcmp(win, CMD_FACTORY,  8) == 0);
     bool isRollback = (memcmp(win, CMD_ROLLBACK, 8) == 0);
+
+    /* 정보 조회는 Flash를 건드리지 않고 읽기만 하므로 OTA 세션 뮤텍스가 필요 없다.
+     * 다만 USART3 송신권은 잡아야 한다 — 여러 줄을 내보내는 사이에 ledTask의 주기
+     * 로그가 끼어들면 PC 쪽에서 한 덩어리로 읽기 어려워진다. */
+    if (memcmp(win, CMD_SYSINFO, 8) == 0)
+    {
+      if (osMutexAcquire(s_uartTxMutex, 1000U) == osOK)
+      {
+        SysInfo_Report(App_SysInfoToUart, NULL);
+        osMutexRelease(s_uartTxMutex);
+      }
+      memset(win, 0, sizeof(win));
+      continue;
+    }
+
     if (!isStaging && !isFactory && !isRollback)
     {
       continue;
@@ -917,6 +954,8 @@ static void StartNetTask(void *argument)
   static const char CMD_ROLLBACK[8] = { 'F','W','R','O','L','L','B','K' };
   /* 상태 조회 — TCP 전용이다. UART는 1초마다 배너가 알아서 나오므로 필요 없다. */
   static const char CMD_INFO[8]     = { 'F','W','I','N','F','O','?','?' };
+  /* 보드/메모리 정보 조회 (접속 직후 1회). UART 쪽과 같은 명령이다. */
+  static const char CMD_SYSINFO[8]  = { 'F','W','S','Y','S','?','?','?' };
 
   NetLink_Init();
 
@@ -972,6 +1011,15 @@ static void StartNetTask(void *argument)
 
       bool isStaging  = (memcmp(win, CMD_STAGING,  8) == 0);
       bool isFactory  = (memcmp(win, CMD_FACTORY,  8) == 0);
+      /* 정보 조회 — Flash를 읽기만 하고, 응답도 이 태스크가 그 자리에서 보낸다
+       * (소켓을 netTask만 만진다는 규칙을 그대로 지킨다). */
+      if (memcmp(win, CMD_SYSINFO, 8) == 0)
+      {
+        SysInfo_Report(App_SysInfoToTcp, NULL);
+        memset(win, 0, sizeof(win));
+        continue;
+      }
+
       bool isRollback = (memcmp(win, CMD_ROLLBACK, 8) == 0);
       if (!isStaging && !isFactory && !isRollback) continue;
 

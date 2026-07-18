@@ -122,7 +122,7 @@ namespace UI_Monitor
                     _tcp.Dispose();
                     _tcp = null;
                     UpdateSocketConnState(false);
-                    AppendLog("[DISCONNECT] RS-232 모드로 전환 — 소켓을 닫았습니다.\r\n", LogCh.Eth);
+                    Log(LogCh.Eth, LogKind.Info, "DISCONNECT — RS-232 모드로 전환하여 소켓을 닫았습니다.");
                 }
             }
             else
@@ -131,7 +131,7 @@ namespace UI_Monitor
                 {
                     _serial.Close();
                     UpdateConnState(false);
-                    AppendLog("[CLOSE] Ethernet 모드로 전환 — COM 포트를 닫았습니다.\r\n", LogCh.Serial);
+                    Log(LogCh.Serial, LogKind.Info, "CLOSE — Ethernet 모드로 전환하여 COM 포트를 닫았습니다.");
                 }
             }
 
@@ -183,7 +183,9 @@ namespace UI_Monitor
                 _serial.Open();
 
                 UpdateConnState(true);
-                AppendLog($"[OPEN] {_serial.PortName} @ {_serial.BaudRate} 8N1\r\n", LogCh.Serial);
+                Log(LogCh.Serial, LogKind.Info, $"OPEN {_serial.PortName} @ {_serial.BaudRate} 8N1");
+                QuerySysInfo(_serialLink, LogCh.Serial);  // 보드/메모리 정보 1회
+                Log(LogCh.Serial, LogKind.State, "State - Normal");
             }
             catch (Exception ex)
             {
@@ -195,8 +197,9 @@ namespace UI_Monitor
         private void Btn_COMCLOSE_Click(object sender, EventArgs e)
         {
             if (_serial.IsOpen) _serial.Close();
+            FlushSerialRx();                       // 줄바꿈 못 받은 잔여분 출력
             UpdateConnState(false);
-            AppendLog("[CLOSE]\r\n", LogCh.Serial);
+            Log(LogCh.Serial, LogKind.Info, "CLOSE");
         }
 
         /// <summary>데이터 수신(백그라운드 스레드) → 뷰어에 표시.</summary>
@@ -205,9 +208,57 @@ namespace UI_Monitor
             try
             {
                 string data = _serial.ReadExisting();
-                AppendLog(data, LogCh.Serial);
+                FeedSerialRx(data);
             }
             catch { /* 포트가 닫히는 중이면 무시 */ }
+        }
+
+        /// <summary>
+        /// 시리얼 수신 조각을 줄 단위로 모아 태그를 붙인다.
+        /// ⚠️ ReadExisting()은 '줄'이 아니라 임의 크기 덩어리를 준다. 조각마다 바로
+        ///    타임스탬프를 붙이면 한 줄이 두 개로 쪼개지거나 여러 줄이 한 태그에 뭉친다.
+        ///    그래서 \n 이 올 때까지 버퍼에 모았다가 완성된 줄만 내보낸다.
+        /// </summary>
+        private void FeedSerialRx(string chunk)
+        {
+            if (string.IsNullOrEmpty(chunk)) return;
+
+            lock (_serialRxLock)
+            {
+                _serialRxBuf.Append(chunk);
+
+                for (;;)
+                {
+                    string s = _serialRxBuf.ToString();
+                    int nl = s.IndexOf('\n');
+                    if (nl < 0) break;
+
+                    string line = s.Substring(0, nl).TrimEnd('\r');
+                    _serialRxBuf.Remove(0, nl + 1);
+
+                    if (line.Length > 0) Log(LogCh.Serial, LogKind.Rx, line);
+                }
+
+                // 보드가 줄바꿈 없이 계속 뱉는 비정상 상황에서 버퍼가 무한히 자라지 않도록.
+                if (_serialRxBuf.Length > 4096)
+                {
+                    Log(LogCh.Serial, LogKind.Rx, _serialRxBuf.ToString());
+                    _serialRxBuf.Clear();
+                }
+            }
+        }
+
+        /// <summary>포트를 닫을 때 줄바꿈을 못 받은 잔여분을 흘려보낸다.</summary>
+        private void FlushSerialRx()
+        {
+            lock (_serialRxLock)
+            {
+                if (_serialRxBuf.Length > 0)
+                {
+                    Log(LogCh.Serial, LogKind.Rx, _serialRxBuf.ToString().TrimEnd('\r'));
+                    _serialRxBuf.Clear();
+                }
+            }
         }
 
         /// <summary>로그를 어느 뷰어에 찍을지. 화면 선택이 아니라 '출처'로 정한다.</summary>
@@ -225,8 +276,47 @@ namespace UI_Monitor
         /// </summary>
         private LogCh? _opCh = null;
 
+        // 시리얼 수신 줄 조립용 (FeedSerialRx 참고). DataReceived는 백그라운드 스레드다.
+        private readonly StringBuilder _serialRxBuf = new StringBuilder();
+        private readonly object _serialRxLock = new object();
+
+        /// <summary>로그 한 줄의 종류. 태그 뒷부분(`[UART-RX]`의 RX)이 된다.</summary>
+        private enum LogKind
+        {
+            Rx,      // 보드 → PC
+            Tx,      // PC → 보드
+            State,   // 전송 단계 (UI가 프로토콜 진행에서 파생)
+            Info,    // 연결/파일 등 안내
+            Err      // 오류
+        }
+
         /// <summary>
-        /// 로그를 출처에 맞는 뷰어에 안전하게 덧붙인다.
+        /// 태그 붙은 한 줄을 기록한다. `[03:10:56][UART-RX] ...` 형식.
+        /// </summary>
+        /// <param name="msg">줄 내용(줄바꿈 없이 넘길 것 — 여기서 붙인다)</param>
+        private void Log(LogCh ch, LogKind kind, string msg)
+        {
+            // 채널 이름은 '출처'를 따른다. Auto면 지금 로그를 만드는 작업 기준으로 정해진다.
+            LogCh resolved = (ch == LogCh.Auto)
+                ? (_opCh ?? (RBtn_TransMode_Ethernet.Checked ? LogCh.Eth : LogCh.Serial))
+                : ch;
+
+            string chanName = (resolved == LogCh.Eth) ? "Ethernet" : "UART";
+            string kindName;
+            switch (kind)
+            {
+                case LogKind.Rx:    kindName = "RX";    break;
+                case LogKind.Tx:    kindName = "TX";    break;
+                case LogKind.State: kindName = "STATE"; break;
+                case LogKind.Err:   kindName = "ERR";   break;
+                default:            kindName = "INFO";  break;
+            }
+
+            AppendLog($"[{DateTime.Now:HH:mm:ss}][{chanName}-{kindName}] {msg}\r\n", resolved);
+        }
+
+        /// <summary>
+        /// 로그를 출처에 맞는 뷰어에 안전하게 덧붙인다(태그 없이 원문 그대로).
         /// ⚠️ 화면에 보이는 모드로 고르면 안 된다 — 시리얼 데이터가 도착한 순간 사용자가
         ///    Ethernet을 보고 있으면 시리얼 로그가 Ethernet 뷰어에 섞인다.
         /// </summary>
@@ -292,7 +382,7 @@ namespace UI_Monitor
 
                     pathBox.Text = dlg.FileName;                          // 선택된 파일 경로 표시
                     sizeLabel.Text = $"{target.Length:N0} Byte";          // 파싱된 이미지 크기 표시
-                    AppendLog($"[{slotName}] {Path.GetFileName(dlg.FileName)} 로드: {target.Length} bytes\r\n");
+                    Log(LogCh.Auto, LogKind.Info, $"{slotName} 이미지 로드: {Path.GetFileName(dlg.FileName)} ({target.Length} bytes)");
                 }
                 catch (Exception ex)
                 {
@@ -403,7 +493,7 @@ namespace UI_Monitor
                 _tcp?.Dispose();
                 _tcp = null;
                 UpdateSocketConnState(false);
-                AppendLog("[i] 보드 재부팅 중 — 다시 쓰려면 재접속(Connect) 하세요.\r\n", LogCh.Eth);
+                Log(LogCh.Eth, LogKind.Info, "보드 재부팅 중 — 다시 쓰려면 재접속(Connect) 하세요.");
             }
 
             if (result == "DONE")
@@ -434,15 +524,17 @@ namespace UI_Monitor
 
                 link.Write(command);
                 if (header != null) link.Write(header, 0, header.Length);
-                AppendLog($"[TX] {command}\r\n");
+                Log(LogCh.Auto, LogKind.Tx, command);
+                Log(LogCh.Auto, LogKind.State, "State - Slot switch requested");
 
                 // MCU는 재부팅 전에 대상 슬롯을 검증하므로 응답까지 잠깐 걸릴 수 있다.
                 string res = WaitForAnyText(new[] { "DONE", "FAILED" }, 5000, link);
-                AppendLog($"[RX] {res ?? "(무응답)"}\r\n");
+                Log(LogCh.Auto, LogKind.Rx, res ?? "(무응답)");
+                if (res == "DONE") Log(LogCh.Auto, LogKind.State, "State - System will RST");
                 return res;
             }
-            catch (TimeoutException) { AppendLog("[ERR] 타임아웃\r\n"); return null; }
-            catch (Exception ex) { AppendLog("[ERR] " + ex.Message + "\r\n"); return null; }
+            catch (TimeoutException) { Log(LogCh.Auto, LogKind.Err, "타임아웃"); return null; }
+            catch (Exception ex) { Log(LogCh.Auto, LogKind.Err, ex.Message); return null; }
             finally
             {
                 link.ResumeAsyncRx();
@@ -502,7 +594,7 @@ namespace UI_Monitor
                 _tcp?.Dispose();
                 _tcp = null;
                 UpdateSocketConnState(false);
-                if (ok) AppendLog("[i] 보드 재부팅 중 — 다시 전송하려면 재접속(Connect) 하세요.\r\n", LogCh.Eth);
+                if (ok) Log(LogCh.Eth, LogKind.Info, "보드 재부팅 중 — 다시 전송하려면 재접속(Connect) 하세요.");
             }
 
             if (ok)
@@ -537,18 +629,19 @@ namespace UI_Monitor
                 link.DiscardInBuffer();
 
                 // 1) 명령 전송 (대상 슬롯 결정)
+                Log(LogCh.Auto, LogKind.State, "State - Updating");
                 link.Write(command);
-                AppendLog($"[TX] {command}\r\n");
+                Log(LogCh.Auto, LogKind.Tx, command);
 
                 // 2) READY 대기
                 if (!WaitForText("READY", 3000, link))
                 {
-                    AppendLog("[ERR] READY 응답 없음 (보드가 초록 하트비트 상태인지 확인)\r\n");
+                    Log(LogCh.Auto, LogKind.Err, "READY 응답 없음 (보드가 초록 하트비트 상태인지 확인)");
                     return false;
                 }
                 Thread.Sleep(30);
                 link.DiscardInBuffer();                    // "READY\r\n"의 \r\n 제거
-                AppendLog("[RX] READY\r\n");
+                Log(LogCh.Auto, LogKind.Rx, "READY");
 
                 // 3) 헤더 전송: [전체크기 4B][CRC32 4B] (little-endian)
                 uint crc = Crc32Stm32(image);
@@ -556,12 +649,14 @@ namespace UI_Monitor
                 BitConverter.GetBytes((uint)image.Length).CopyTo(header, 0);
                 BitConverter.GetBytes(crc).CopyTo(header, 4);
                 link.Write(header, 0, 8);
-                AppendLog($"[TX] size={image.Length}, CRC32=0x{crc:X8}\r\n");
+                Log(LogCh.Auto, LogKind.Tx, $"size={image.Length}, CRC32=0x{crc:X8}");
 
-                // 4) Staging erase 후 ACK
+                // 4) Staging erase 후 ACK — 보드가 섹터를 지우는 동안이라 수 초 걸릴 수 있다.
+                Log(LogCh.Auto, LogKind.State, "State - Erasing (보드가 대상 슬롯 소거 중)");
                 int b = link.ReadByte();
-                if (b != ACK) { AppendLog($"[ERR] erase ACK 실패 (0x{b:X2})\r\n"); return false; }
-                AppendLog($"[RX] ACK — 전송 시작 ({image.Length} bytes)\r\n");
+                if (b != ACK) { Log(LogCh.Auto, LogKind.Err, $"erase ACK 실패 (0x{b:X2})"); return false; }
+                Log(LogCh.Auto, LogKind.Rx, $"ACK — 소거 완료, 전송 시작 ({image.Length} bytes)");
+                Log(LogCh.Auto, LogKind.State, "State - Saving Stage");
 
                 _txStartMs = Environment.TickCount;   // 실시간 속도 계산 기준 시각
                 _lastLoggedDecile = -1;
@@ -595,36 +690,44 @@ namespace UI_Monitor
                         {
                             if (++retries > 5)
                             {
-                                AppendLog($"[ERR] 청크 재시도 초과 @ offset {sent}\r\n");
+                                Log(LogCh.Auto, LogKind.Err, $"청크 재시도 초과 @ offset {sent}");
                                 return false;
                             }
                             totalRetries++;
-                            AppendLog($"[!] 청크 CRC 불일치 → 재전송 @ {sent} (retry {retries})\r\n");
+                            Log(LogCh.Auto, LogKind.Err, $"청크 CRC 불일치 → 재전송 @ {sent} (retry {retries})");
                             continue;                       // 같은 청크 재전송
                         }
-                        AppendLog($"[ERR] 예상치 못한 응답 0x{resp:X2} @ offset {sent}\r\n");
+                        Log(LogCh.Auto, LogKind.Err, $"예상치 못한 응답 0x{resp:X2} @ offset {sent}");
                         return false;
                     }
 
                     sent += n;
                     UpdateProgress(sent, image.Length);
                 }
-                if (totalRetries > 0) AppendLog($"[i] 청크 재전송 총 {totalRetries}회 (자동 복구됨)\r\n");
+                if (totalRetries > 0) Log(LogCh.Auto, LogKind.Info, $"청크 재전송 총 {totalRetries}회 (자동 복구됨)");
 
                 // 6) MCU가 Staging CRC를 검증한 결과 대기 (DONE 또는 CRCERR)
+                Log(LogCh.Auto, LogKind.State, "State - Verifying (보드가 전체 CRC32 검증 중)");
                 string res = WaitForAnyText(new[] { "DONE", "CRCERR" }, 5000, link);
                 if (res == "CRCERR")
                 {
-                    AppendLog("[ERR] CRC 불일치 — 전송이 손상됨 (적용되지 않음)\r\n");
+                    Log(LogCh.Auto, LogKind.Rx, "CRCERR");
+                    Log(LogCh.Auto, LogKind.Err, "전체 CRC 불일치 — 전송이 손상됨 (적용되지 않음)");
                     return false;
                 }
-                if (res != "DONE") { AppendLog("[ERR] 완료 응답 없음\r\n"); return false; }
+                if (res != "DONE") { Log(LogCh.Auto, LogKind.Err, "완료 응답 없음"); return false; }
 
-                AppendLog("[RX] DONE — CRC 검증 통과, 보드가 재부팅되어 적용됩니다\r\n");
+                Log(LogCh.Auto, LogKind.Rx, "DONE — CRC 검증 통과");
+                Log(LogCh.Auto, LogKind.State, "State - Update Done");
+
+                // FWFACTRY(Factory 직접 쓰기)는 재부팅하지 않는다. 그 구분은 호출자가 안다.
+                if (command == "FWUPDATE")
+                    Log(LogCh.Auto, LogKind.State, "State - System will RST");
+
                 return true;
             }
-            catch (TimeoutException) { AppendLog("[ERR] 타임아웃\r\n"); return false; }
-            catch (Exception ex) { AppendLog("[ERR] " + ex.Message + "\r\n"); return false; }
+            catch (TimeoutException) { Log(LogCh.Auto, LogKind.Err, "타임아웃"); return false; }
+            catch (Exception ex) { Log(LogCh.Auto, LogKind.Err, ex.Message); return false; }
             finally
             {
                 link.ResumeAsyncRx();   // 비동기 수신 복원(TCP는 no-op)
@@ -723,7 +826,7 @@ namespace UI_Monitor
             if (decile != _lastLoggedDecile)
             {
                 _lastLoggedDecile = decile;
-                AppendLog($"[전송] {pct,3}%  {sent:N0}/{total:N0} bytes  {kbps:F1} KB/s\r\n");
+                Log(LogCh.Auto, LogKind.Tx, $"{pct,3}%  {sent:N0}/{total:N0} bytes  {kbps:F1} KB/s");
             }
         }
 
@@ -767,6 +870,57 @@ namespace UI_Monitor
         // ============================================================
 
         /// <summary>보드에 FWINFO??를 보내 상태 한 줄을 받아 뷰어에 출력한다.</summary>
+        /// <summary>
+        /// 접속 직후 1회: 보드에 FWSYS??? 를 보내 장치 정보 + 메모리 사용량을 받아 찍는다.
+        /// </summary>
+        /// <remarks>
+        /// 응답은 여러 줄이고 종료 표시가 따로 없다. 그래서 '한 줄 읽고 짧은 타임아웃으로
+        /// 더 안 오면 끝'으로 판정한다 — 보드가 연속으로 즉시 보내므로 실제로는 첫 타임아웃이
+        /// 곧 끝을 뜻한다. 길이를 헤더로 주는 방식이 더 견고하지만, 이 명령은 사람이 읽는
+        /// 진단용이라 프로토콜을 늘리지 않았다.
+        /// </remarks>
+        private void QuerySysInfo(IFwLink link, LogCh ch)
+        {
+            if (link == null || !link.IsConnected) return;
+
+            try
+            {
+                link.PauseAsyncRx();                 // 시리얼이면 비동기 뷰어가 가로채지 않도록
+                link.DiscardInBuffer();
+                link.ReadTimeout = 1000;             // 첫 줄은 넉넉히 기다린다
+                link.Write("FWSYS???");
+
+                var sb = new StringBuilder(128);
+                int lines = 0;
+
+                while (lines < 32)                   // 폭주 방어
+                {
+                    int b;
+                    try { b = link.ReadByte(); }
+                    catch (TimeoutException) { break; }   // 더 안 옴 = 보고 끝
+
+                    if (b == '\n')
+                    {
+                        if (sb.Length > 0) { Log(ch, LogKind.Rx, sb.ToString()); lines++; sb.Clear(); }
+                        link.ReadTimeout = 300;      // 이후 줄은 짧게 — 끝을 빨리 판정
+                        continue;
+                    }
+                    if (b != '\r') sb.Append((char)b);
+                }
+
+                if (sb.Length > 0) Log(ch, LogKind.Rx, sb.ToString());
+                if (lines == 0) Log(ch, LogKind.Err, "FWSYS??? 응답 없음 (보드 펌웨어가 이 명령을 모를 수 있음)");
+            }
+            catch (Exception ex)
+            {
+                Log(ch, LogKind.Err, "시스템 정보 조회 실패: " + ex.Message);
+            }
+            finally
+            {
+                link.ResumeAsyncRx();
+            }
+        }
+
         private void PollFirmwareInfo()
         {
             var link = _tcp;
@@ -785,7 +939,7 @@ namespace UI_Monitor
                     if (b == '\n') break;
                     if (b != '\r') sb.Append((char)b);
                 }
-                if (sb.Length > 0) AppendLog(sb.ToString() + "\r\n", LogCh.Eth);
+                if (sb.Length > 0) Log(LogCh.Eth, LogKind.Rx, sb.ToString());
             }
             catch (TimeoutException)
             {
@@ -794,7 +948,7 @@ namespace UI_Monitor
             catch (Exception ex)
             {
                 // 소켓이 끊긴 경우 — 폴링을 멈추고 연결 상태를 실제와 맞춘다.
-                AppendLog("[ERR] 상태 조회 실패: " + ex.Message + "\r\n", LogCh.Eth);
+                Log(LogCh.Eth, LogKind.Err, "상태 조회 실패: " + ex.Message);
                 _infoTimer.Stop();
                 _tcp?.Dispose();
                 _tcp = null;
@@ -825,7 +979,9 @@ namespace UI_Monitor
 
                 PollFirmwareInfo();      // 접속 직후 1회 — 첫 표시까지 1초를 기다리지 않도록
                 _infoTimer.Start();
-                AppendLog($"[CONNECT] {ip}:{port} 연결됨\r\n", LogCh.Eth);
+                Log(LogCh.Eth, LogKind.Info, $"CONNECT {ip}:{port} 연결됨");
+                QuerySysInfo(_tcp, LogCh.Eth);          // 보드/메모리 정보 1회
+                Log(LogCh.Eth, LogKind.State, "State - Normal");
             }
             catch (Exception ex)
             {
@@ -843,7 +999,7 @@ namespace UI_Monitor
             _tcp?.Dispose();
             _tcp = null;
             UpdateSocketConnState(false);
-            AppendLog("[DISCONNECT]\r\n", LogCh.Eth);
+            Log(LogCh.Eth, LogKind.Info, "DISCONNECT");
         }
 
         /// <summary>소켓 연결 상태에 따라 Connect/Disconnect 버튼과 상태 표시줄을 갱신한다.</summary>

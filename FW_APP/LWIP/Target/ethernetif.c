@@ -33,7 +33,32 @@
 
 /* Within 'USER CODE' section, code will be kept by default at each generation */
 /* USER CODE BEGIN 0 */
+#include "dbg_uart.h"
 
+/* [진단] PHY 링크 상태와 MAC에 실제로 적용한 속도를 시리얼로 찍는다.
+ * "PHY와 MAC이 어긋났다"는 가설을 눈으로 확인하기 위한 것 —
+ * PC의 Get-NetAdapter 값과 대조하면 양쪽이 일치하는지 바로 드러난다. */
+static void EthDbg_Link(const char *where, int32_t state, uint32_t applied)
+{
+  Dbg_Puts("[ETH] ");
+  Dbg_Puts(where);
+  Dbg_Puts(" phy=");
+  switch (state)
+  {
+    case LAN8742_STATUS_LINK_DOWN:             Dbg_Puts("LINK_DOWN");        break;
+    case LAN8742_STATUS_100MBITS_FULLDUPLEX:   Dbg_Puts("100M-FULL");        break;
+    case LAN8742_STATUS_100MBITS_HALFDUPLEX:   Dbg_Puts("100M-HALF");        break;
+    case LAN8742_STATUS_10MBITS_FULLDUPLEX:    Dbg_Puts("10M-FULL");         break;
+    case LAN8742_STATUS_10MBITS_HALFDUPLEX:    Dbg_Puts("10M-HALF");         break;
+    case LAN8742_STATUS_AUTONEGO_NOTDONE:      Dbg_Puts("AUTONEG-NOTDONE");  break;
+    default:                                   Dbg_Puts("err(");
+                                               Dbg_PutU32((uint32_t)state);
+                                               Dbg_Puts(")");                break;
+  }
+  if (applied) { Dbg_Puts("  -> MAC applied"); }
+  else         { Dbg_Puts("  -> MAC unchanged (link kept down)"); }
+  Dbg_Puts("\r\n");
+}
 /* USER CODE END 0 */
 
 /* Private define ------------------------------------------------------------*/
@@ -200,6 +225,8 @@ static void low_level_init(struct netif *netif)
   osThreadAttr_t attributes;
 /* USER CODE END OS_THREAD_ATTR_CMSIS_RTOS_V2 */
   uint32_t duplex, speed = 0;
+  /* [수정] 오토네고가 끝나 '실제 속도'를 읽었을 때만 1. 아래 default 케이스 주석 참고. */
+  uint32_t speedKnown = 0U;
   int32_t PHYLinkState = 0;
   ETH_MACConfigTypeDef MACConf = {0};
   /* Start ETH HAL Init */
@@ -304,34 +331,59 @@ static void low_level_init(struct netif *netif)
       case LAN8742_STATUS_100MBITS_FULLDUPLEX:
         duplex = ETH_FULLDUPLEX_MODE;
         speed = ETH_SPEED_100M;
+        speedKnown = 1U;
         break;
       case LAN8742_STATUS_100MBITS_HALFDUPLEX:
         duplex = ETH_HALFDUPLEX_MODE;
         speed = ETH_SPEED_100M;
+        speedKnown = 1U;
         break;
       case LAN8742_STATUS_10MBITS_FULLDUPLEX:
         duplex = ETH_FULLDUPLEX_MODE;
         speed = ETH_SPEED_10M;
+        speedKnown = 1U;
         break;
       case LAN8742_STATUS_10MBITS_HALFDUPLEX:
         duplex = ETH_HALFDUPLEX_MODE;
         speed = ETH_SPEED_10M;
+        speedKnown = 1U;
         break;
       default:
-        duplex = ETH_FULLDUPLEX_MODE;
-        speed = ETH_SPEED_100M;
+        /* [수정] ST 원본은 여기서 "100M 풀듀플렉스"로 **추측**하고 그대로 링크를 올렸다.
+         *
+         * 바로 위 LAN8742_Init()이 PHY를 리셋하고 오토네고를 다시 시작하는데, 그건
+         * 2~3초가 걸린다. 그런데 GetLinkState()를 곧바로 읽으므로 대개 아직
+         * AUTONEGO_NOTDONE(6)이고, case에 없으니 이 default로 떨어진다.
+         *
+         * 문제는 추측한 뒤 netif_set_link_up()까지 부른다는 것이다. 그러면
+         * ethernet_link_thread의 재평가 조건(!netif_is_link_up)에 다시는 걸리지 않아,
+         * 실제 협상이 10M로 끝나도 MAC은 100M인 채 고착된다
+         * → 링크는 Up인데 프레임을 못 받는다(ARP조차 무응답). 리셋으로만 복구.
+         *
+         * → 모르면 올리지 않는다. 링크를 down으로 둔 채 두면 100ms 뒤 링크 스레드가
+         *   협상 완료를 보고 올바른 속도로 올려준다. */
         break;
       }
 
-    /* Get MAC Config MAC */
-    HAL_ETH_GetMACConfig(&heth, &MACConf);
-    MACConf.DuplexMode = duplex;
-    MACConf.Speed = speed;
-    HAL_ETH_SetMACConfig(&heth, &MACConf);
+    if (speedKnown)
+    {
+      /* Get MAC Config MAC */
+      HAL_ETH_GetMACConfig(&heth, &MACConf);
+      MACConf.DuplexMode = duplex;
+      MACConf.Speed = speed;
+      HAL_ETH_SetMACConfig(&heth, &MACConf);
 
-    HAL_ETH_Start_IT(&heth);
-    netif_set_up(netif);
-    netif_set_link_up(netif);
+      HAL_ETH_Start_IT(&heth);
+      netif_set_up(netif);
+      netif_set_link_up(netif);
+    }
+    else
+    {
+      /* 아직 속도를 모른다 — 링크 스레드가 협상 완료 후 올린다. */
+      netif_set_down(netif);
+      netif_set_link_down(netif);
+    }
+    EthDbg_Link("init ", PHYLinkState, speedKnown);
 /* USER CODE BEGIN PHY_POST_CONFIG */
 
 /* USER CODE END PHY_POST_CONFIG */
@@ -818,11 +870,31 @@ void ethernet_link_thread(void* argument)
   {
   PHYLinkState = LAN8742_GetLinkState(&LAN8742);
 
+  /* [수정] ST 원본은 linkchanged/speed/duplex를 루프 '밖'에 선언해두고 여기서 초기화하지
+   * 않는다. 그래서 한 번 1이 되면 영영 1로 남아 아래 문제가 생겼다:
+   *
+   *   1. 최초 링크 업 — PHY가 100M 보고 → speed=100M, linkchanged=1 → 정상 설정
+   *   2. 케이블 분리 → 링크 다운
+   *   3. 재연결 — 이 스레드가 100ms마다 도는데 '오토네고 미완료' 순간에 걸리면
+   *      switch가 default로 빠져 speed/duplex가 갱신되지 않는다.
+   *   4. 그런데 linkchanged는 아직 1 → 지난번 값으로 MAC을 설정하고
+   *      netif_set_link_up()까지 호출해 버린다.
+   *   5. 이제 netif가 up이라 위 else-if 조건에 다시는 걸리지 않는다
+   *      → PHY 실제 속도와 MAC 설정이 어긋난 채 고착 → 프레임 수신 불가.
+   *
+   * 증상: 링크는 Up인데 ARP조차 무응답. 보드 리셋이나 '운 좋은' 재연결로만 복구.
+   * 폴링 시점이 오토네고 완료 전후 어디에 걸리느냐에 달린 경합이라 재현이 들쭉날쭉하다.
+   *
+   * → 매 회 0으로 초기화한다. 유효한 속도를 실제로 읽은 경우에만 MAC을 설정하고,
+   *   아니면 netif를 down인 채로 두고 100ms 뒤 다시 시도한다. */
+  linkchanged = 0U;
+
   if(netif_is_link_up(netif) && (PHYLinkState <= LAN8742_STATUS_LINK_DOWN))
   {
     HAL_ETH_Stop_IT(&heth);
     netif_set_down(netif);
     netif_set_link_down(netif);
+    EthDbg_Link("down ", PHYLinkState, 0U);
   }
   else if(!netif_is_link_up(netif) && (PHYLinkState > LAN8742_STATUS_LINK_DOWN))
   {
@@ -862,11 +934,26 @@ void ethernet_link_thread(void* argument)
       HAL_ETH_Start_IT(&heth);
       netif_set_up(netif);
       netif_set_link_up(netif);
+      EthDbg_Link("up   ", PHYLinkState, 1U);
     }
   }
 
 /* USER CODE BEGIN ETH link Thread core code for User BSP */
-
+    /* [진단] 링크가 up인 동안 PHY 속도가 바뀌는지 감시한다.
+     *
+     * 지금 구조에서는 아무도 이걸 보지 않는다 — 위 else-if는 netif가 down일 때만 돌기
+     * 때문이다. 그래서 "링크를 유지한 채 100M→10M로 재협상"되면 MAC은 옛 설정 그대로
+     * 남는다는 가설이 있었는데, 확인할 방법이 없었다.
+     *
+     * 상태가 바뀔 때만 찍는다(매 100ms 찍으면 로그가 OTA를 방해한다). */
+    {
+      static int32_t lastState = -99;
+      if (PHYLinkState != lastState)
+      {
+        lastState = PHYLinkState;
+        EthDbg_Link("poll ", PHYLinkState, 0U);
+      }
+    }
 /* USER CODE END ETH link Thread core code for User BSP */
 
     osDelay(100);
