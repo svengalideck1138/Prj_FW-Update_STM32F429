@@ -12,8 +12,9 @@ NUCLEO-F429ZI 보드를 대상으로, **ST-Link 없이** **UART 또는 Ethernet*
 >
 > **실기 검증 완료**: UART OTA / Ethernet OTA / Factory 직접 쓰기(**UART·Ethernet 양쪽**) / 자동 롤백(BAD 빌드→워치독→복원) / 강제 롤백(`FWROLLBK`) / 청크 재전송 / TCP 재접속 반복 / Ethernet 상태 표출(`FWINFO??`).
 >
-> **미해결** (§8 "알려진 한계" 참고):
-> - ⚠️ **Ethernet RX가 이따금 죽는다** — 링크는 Up인데 ARP조차 무응답, **보드 리셋으로만 복구**. 원인 미확정(유력 가설 있음).
+> **미해결**: 없음.
+>
+> 오래 남아 있던 "Ethernet 전송 후 이따금 ping 불통"은 ST 생성 `ethernetif.c`의 **RX 데드락**으로 원인이 확정되어 수정했다(§10 트러블슈팅). 다만 확률적 레이스였으므로 재발 여부는 계속 지켜볼 것.
 > - `ledTask` 스택 1024B 상향 후 자원 재측정 (§8 자원 실측 — 값이 부팅마다 크게 흔들리니 여러 번 볼 것)
 
 ---
@@ -421,10 +422,8 @@ F429ZI 2MB는 듀얼 뱅크다: **Bank1 = 0x0800_0000~0x080F_FFFF, Bank2 = 0x081
 - `FwInfo` 버전 표식은 슬롯 전체를 스캔해 찾는다(고정 오프셋 아님). 512KB 스캔이라 1초 주기 로그에서는 무시할 만하지만, 더 자주 호출하려면 캐싱이 필요하다. **`FWINFO??` 폴링도 같은 1초 주기**이므로 현재는 문제없다 — 주기를 줄이려면 캐싱을 먼저 넣을 것.
 - **미검증 항목**: `ledTask` 스택 1024B 상향 후 재측정(여러 부팅에서 볼 것).
 - `[RES]` 자원 로그는 **UART에만** 나간다. TCP는 `FWINFO??`로 상태 한 줄만 응답한다(진단 콘솔은 UART가 맡는 구조). Ethernet만 연결한 채 자원을 봐야 한다면 `FWRES???` 같은 조회 명령을 추가하면 된다.
-- **간헐 미해결 — Ethernet RX가 죽는다.** 물리 링크는 Up인데 **ARP조차 무응답**, **보드 리셋으로만 복구**. (2026-07-19 재확인. 이전에 기록된 "PC NIC 쪽이 유력"은 **틀렸다** — PC를 건드리지 않고 보드 리셋만으로 살아났다.)
-  - **유력 가설**: `ethernetif.c`의 `TIME_WAITING_FOR_INPUT = portMAX_DELAY` 때문에 `ethernetif_input`이 영구 대기에 빠진다. RX 풀이 고갈되면 `RxAllocStatus = RX_ALLOC_ERROR`가 되는데, 그 시점에 이미 모든 pbuf가 반납된 뒤라면 `pbuf_free_custom()`이 다시 불리지 않아 아무도 상태를 되돌리지 않는다. RX 디스크립터가 재구축되지 않아 MAC이 수신을 못 하고 → RX 인터럽트도 안 온다. 두 깨우기 경로가 동시에 막혀 리셋 외엔 탈출구가 없다. ST CubeMX 생성 ethernetif의 알려진 문제.
-  - **확정 방법**: 멈춘 동안 **USART3 로그가 계속 나오는지** 확인. 계속 나온다면 시스템은 살아 있고 `ethernetif_input`만 잠든 것 → 가설과 일치.
-  - **수정안**: `TIME_WAITING_FOR_INPUT`을 유한값(예: 100ms)으로. 수신 스레드가 주기적으로 깨어나 디스크립터를 재구축하므로 레이스가 나도 자가 복구한다. ⚠️ 단 이 `#define`은 **USER CODE 블록 밖**이라 CubeMX 재생성 시 되돌아간다(§9 재생성 함정 목록 참고).
+- ~~**Ethernet 전송 후 이따금 ping 불통**~~ → **원인 확정·수정 완료**(§10 트러블슈팅). ST 생성 `ethernetif.c`의 RX 데드락이었다. 수정 후 반복 전송에서 재현되지 않음.
+  - 다만 **확률적 레이스**였으므로 "안 나온다"가 곧 증명은 아니다. 재발하면 §9 함정 목록 5번(재생성으로 되돌아갔는지)부터 확인할 것.
 
 ---
 
@@ -438,7 +437,7 @@ F429ZI 2MB는 듀얼 뱅크다: **Bank1 = 0x0800_0000~0x080F_FFFF, Bank2 = 0x081
 | 2 | **링커 `.ld`의 FLASH ORIGIN/LENGTH** | 부트로더/앱이 서로의 영역을 침범 | FW_BOOT `0x0800_0000`/64K, FW_APP `0x0802_0000`/512K |
 | 3 | **FW_BOOT `.ioc`의 LWIP/ETH/USB** | 부트로더가 64KB를 넘겨 `region FLASH overflowed` (약 76KB) | 전부 해제. 부트로더는 `RCC/SYS/GPIO/IWDG/USART3`만 필요 (현재 12.95KB) |
 | 4 | **`lwipopts.h`** | 튜닝값이 기본값으로 (특히 `MEM_SIZE`) | USER CODE 블록 밖의 수정은 매번 재확인 |
-| 5 | **`ethernetif.c`의 `TIME_WAITING_FOR_INPUT`** | 유한 타임아웃으로 고쳐뒀다면 `portMAX_DELAY`로 복귀 → RX 데드락 자가복구가 사라진다(§8 알려진 한계 참고) | USER CODE 블록 **밖**이므로 매번 확인. 바로 위 `INTERFACE_THREAD_STACK_SIZE`는 USER CODE 안이라 유지된다 |
+| 5 | **`ethernetif.c`의 RX 데드락 수정 3곳** | `portMAX_DELAY` 복귀 → **Ethernet 수신이 이따금 영구 정지**(링크는 Up인데 ARP 무응답, 리셋으로만 복구). 증상이 한참 뒤에 나타나 원인 추적이 어렵다 | ① `TIME_WAITING_FOR_INPUT`이 `pdMS_TO_TICKS(100)`인지 ② `ethernetif_input`이 세마포어 반환값과 무관하게 매번 수신 재시도 + `RxAllocStatus` 해제를 하는지 ③ `RxAllocStatus`가 `volatile`인지. 셋 다 USER CODE 블록 **밖**이다 (바로 위 `INTERFACE_THREAD_STACK_SIZE`는 안이라 유지된다) |
 
 > **왜 이 목록이 따로 있나.** 위 항목들은 전부 "CubeMX가 관리하는 영역"에 있어 USER CODE 주석으로 보호되지 않는다. 1번은 이 프로젝트에서 **실제로 두 번** 당했다.
 
@@ -460,6 +459,7 @@ F429ZI 2MB는 듀얼 뱅크다: **Bank1 = 0x0800_0000~0x080F_FFFF, Bank2 = 0x081
 | **특정 오프셋에서 청크 CRC 실패, 재전송 5회 전부 실패** | DMA 콜백에서 HAL의 `Size` 인자를 위치로 오해. HT/TC는 **고정값**(256/512)이고 IDLE만 실제 위치인데, 두 IRQ 우선순위가 같아 순서가 뒤바뀌면 랩어라운드로 오인해 버퍼 한 바퀴를 잘못 주입 → 스트림이 영구히 어긋남 | `Size`를 쓰지 말고 `__HAL_DMA_GET_COUNTER()`로 **실제 위치를 직접 계산** |
 | Factory 버전이 `????`로 표시 | 워치독 리셋으로 **App→Factory 자동 캡처가 중단**되어 매직만 복사되고 문자열은 쓰레기 | 버전 문자열이 출력 가능한 ASCII인지까지 검증. Factory는 **CRC 검증되는 `FWFACTRY` 경로**로 채우는 편이 확실 |
 | 주기 로그가 UART OTA를 깨뜨림 | USART3는 OTA 채널이기도 하다 | 송신권 뮤텍스로 배타 처리 — OTA 세션 중에는 로그를 자동으로 건너뜀 |
+| **펌웨어 전송 후 이따금 ping 불통** (링크 Up, **ARP조차 무응답**, 시리얼 로그는 정상, 보드 리셋으로만 복구) | ST 생성 `ethernetif.c`의 RX 데드락. ① 대량 수신으로 RX pbuf 풀 고갈 → `RxAllocStatus = RX_ALLOC_ERROR` ② `low_level_input()`은 `RX_ALLOC_OK`가 아니면 즉시 NULL → `do/while` 탈출 ③ `portMAX_DELAY`로 무한 대기 ④ 깨울 수 있는 건 ETH RX 인터럽트(디스크립터가 없어 안 옴)와 `pbuf_free_custom()`뿐인데, 플래그가 세워진 시점에 모든 pbuf가 이미 반납된 뒤면 후자도 불리지 않음 → **영구 정지** | `ethernetif.c` 3곳 수정: ① `TIME_WAITING_FOR_INPUT` → `pdMS_TO_TICKS(100)` ② `ethernetif_input`이 세마포어 반환값과 무관하게 매번 수신 재시도하고, 진입 시 `RX_ALLOC_ERROR`를 해제 ③ `RxAllocStatus`에 `volatile`. **타임아웃만 유한값으로 바꾸는 건 효과가 없다** — 타임아웃 시 `osOK`가 아니라 수신 시도를 건너뛰고, 들어가도 플래그가 ERROR인 채라 또 NULL이 나온다 |
 | **Ethernet 접속 직후 `연결이 강제로 끊겼습니다`** (보드는 리셋 안 됨, `up=`이 계속 증가) | `ledTask`가 `netTask`와 **같은 소켓에** `lwip_send`를 했다. `LWIP_NETCONN_FULLDUPLEX=0`(기본값)에서 netconn은 `current_msg`/`op_completed` 세마포어가 하나뿐이라, `lwip_recv`로 블록 중인 소켓에 다른 스레드가 쓰면 상태가 깨져 lwIP가 연결을 abort한다 | **소켓은 `netTask`만 만진다.** 상태 표출은 보드가 먼저 보내는 대신 `FWINFO??` 요청-응답으로 전환 — 요청받은 태스크가 그 자리에서 답하므로 충돌 조건 자체가 없어진다. `lwipopts.h`에 `LWIP_NETCONN_FULLDUPLEX=1`을 켜는 방법도 있으나 **CubeMX 재생성 시 되돌아가** 버그가 조용히 부활한다 |
 
 ---

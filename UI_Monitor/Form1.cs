@@ -110,6 +110,31 @@ namespace UI_Monitor
         {
             bool isRS232 = RBtn_TransMode_RS232.Checked;
 
+            // 쓰지 않게 된 쪽 연결은 자동으로 닫는다.
+            // 사용자가 Close/Disconnect를 잊고 모드만 바꾸면 그 연결이 배경에 남아
+            // 포트를 계속 점유하고(다른 프로그램이 COM을 못 엶), Ethernet 쪽은 폴링
+            // 타이머가 계속 돌며 보이지도 않는 뷰어에 로그를 쌓는다.
+            if (isRS232)
+            {
+                if (_tcp != null)
+                {
+                    _infoTimer.Stop();
+                    _tcp.Dispose();
+                    _tcp = null;
+                    UpdateSocketConnState(false);
+                    AppendLog("[DISCONNECT] RS-232 모드로 전환 — 소켓을 닫았습니다.\r\n", LogCh.Eth);
+                }
+            }
+            else
+            {
+                if (_serial.IsOpen)
+                {
+                    _serial.Close();
+                    UpdateConnState(false);
+                    AppendLog("[CLOSE] Ethernet 모드로 전환 — COM 포트를 닫았습니다.\r\n", LogCh.Serial);
+                }
+            }
+
             // 수신 뷰어 전환 (같은 위치에 겹쳐 있으므로 Visible로 하나만 노출)
             GroupBox_ViewerRS232.Visible = isRS232;
             GroupBox_ViewerEthernet.Visible = !isRS232;
@@ -158,7 +183,7 @@ namespace UI_Monitor
                 _serial.Open();
 
                 UpdateConnState(true);
-                AppendLog($"[OPEN] {_serial.PortName} @ {_serial.BaudRate} 8N1\r\n");
+                AppendLog($"[OPEN] {_serial.PortName} @ {_serial.BaudRate} 8N1\r\n", LogCh.Serial);
             }
             catch (Exception ex)
             {
@@ -171,7 +196,7 @@ namespace UI_Monitor
         {
             if (_serial.IsOpen) _serial.Close();
             UpdateConnState(false);
-            AppendLog("[CLOSE]\r\n");
+            AppendLog("[CLOSE]\r\n", LogCh.Serial);
         }
 
         /// <summary>데이터 수신(백그라운드 스레드) → 뷰어에 표시.</summary>
@@ -180,18 +205,40 @@ namespace UI_Monitor
             try
             {
                 string data = _serial.ReadExisting();
-                AppendLog(data);
+                AppendLog(data, LogCh.Serial);
             }
             catch { /* 포트가 닫히는 중이면 무시 */ }
         }
 
-        /// <summary>수신/진행 로그를 현재 전송 모드의 뷰어(RS-232 또는 Ethernet)에 안전하게 덧붙인다.</summary>
-        private void AppendLog(string text)
+        /// <summary>로그를 어느 뷰어에 찍을지. 화면 선택이 아니라 '출처'로 정한다.</summary>
+        private enum LogCh
+        {
+            Serial,   // RS-232에서 받았거나 COM 포트에 대한 메시지 → 항상 RS-232 뷰어
+            Eth,      // TCP에서 받았거나 소켓에 대한 메시지        → 항상 Ethernet 뷰어
+            Auto      // 출처가 정해지지 않은 메시지 → 진행 중인 작업, 없으면 현재 모드
+        }
+
+        /// <summary>
+        /// 전송/슬롯전환이 진행 중일 때 그 작업이 쓰는 채널. 진행 중이 아니면 null.
+        /// 전송은 한 번에 하나만 돌고(SetTransferUi가 보장) 백그라운드 스레드에서 로그를
+        /// 올리므로, 그 로그가 '작업을 시작한 모드'의 뷰어로 가도록 여기에 기억해 둔다.
+        /// </summary>
+        private LogCh? _opCh = null;
+
+        /// <summary>
+        /// 로그를 출처에 맞는 뷰어에 안전하게 덧붙인다.
+        /// ⚠️ 화면에 보이는 모드로 고르면 안 된다 — 시리얼 데이터가 도착한 순간 사용자가
+        ///    Ethernet을 보고 있으면 시리얼 로그가 Ethernet 뷰어에 섞인다.
+        /// </summary>
+        private void AppendLog(string text, LogCh ch = LogCh.Auto)
         {
             if (IsDisposed) return;
-            if (InvokeRequired) { BeginInvoke(new Action(() => AppendLog(text))); return; }
+            if (InvokeRequired) { BeginInvoke(new Action(() => AppendLog(text, ch))); return; }
 
-            var box = RBtn_TransMode_Ethernet.Checked ? Tbox_Ethernet_ReceivedLog : Tbox_RS232_ReceivedLog;
+            if (ch == LogCh.Auto)
+                ch = _opCh ?? (RBtn_TransMode_Ethernet.Checked ? LogCh.Eth : LogCh.Serial);
+
+            var box = (ch == LogCh.Eth) ? Tbox_Ethernet_ReceivedLog : Tbox_RS232_ReceivedLog;
             if (!box.IsDisposed) box.AppendText(text);
         }
 
@@ -344,7 +391,10 @@ namespace UI_Monitor
             }
 
             SetTransferUi(true);
-            string result = await Task.Run(() => SendSlotSwitch(command, header, link));
+            _opCh = eth ? LogCh.Eth : LogCh.Serial;   // 작업 로그를 시작한 모드의 뷰어로 고정
+            string result;
+            try     { result = await Task.Run(() => SendSlotSwitch(command, header, link)); }
+            finally { _opCh = null; }
             SetTransferUi(false);
 
             // 성공하면 보드가 재부팅된다 → Ethernet 연결은 끊어지므로 정리.
@@ -353,7 +403,7 @@ namespace UI_Monitor
                 _tcp?.Dispose();
                 _tcp = null;
                 UpdateSocketConnState(false);
-                AppendLog("[i] 보드 재부팅 중 — 다시 쓰려면 재접속(Connect) 하세요.\r\n");
+                AppendLog("[i] 보드 재부팅 중 — 다시 쓰려면 재접속(Connect) 하세요.\r\n", LogCh.Eth);
             }
 
             if (result == "DONE")
@@ -439,7 +489,10 @@ namespace UI_Monitor
             }
 
             SetTransferUi(true);
-            bool ok = await Task.Run(() => SendFirmwareSequence(image, link, command));
+            _opCh = eth ? LogCh.Eth : LogCh.Serial;   // 작업 로그를 시작한 모드의 뷰어로 고정
+            bool ok;
+            try     { ok = await Task.Run(() => SendFirmwareSequence(image, link, command)); }
+            finally { _opCh = null; }
             SetTransferUi(false);
 
             // Ethernet + 보드가 재부팅하는 경우에만 연결을 정리한다.
@@ -449,7 +502,7 @@ namespace UI_Monitor
                 _tcp?.Dispose();
                 _tcp = null;
                 UpdateSocketConnState(false);
-                if (ok) AppendLog("[i] 보드 재부팅 중 — 다시 전송하려면 재접속(Connect) 하세요.\r\n");
+                if (ok) AppendLog("[i] 보드 재부팅 중 — 다시 전송하려면 재접속(Connect) 하세요.\r\n", LogCh.Eth);
             }
 
             if (ok)
@@ -690,6 +743,11 @@ namespace UI_Monitor
             Btn_SOCKETConnect.Enabled = !active && !tcpConn;
             Btn_SOCKETDisconnect.Enabled = !active && tcpConn;
 
+            // 전송 중에는 모드 전환을 막는다. ApplyTransferMode가 '쓰지 않는 쪽' 연결을
+            // 닫아버리므로, 전송 도중 모드를 바꾸면 그 전송이 쓰던 포트/소켓이 닫힌다.
+            RBtn_TransMode_RS232.Enabled = !active;
+            RBtn_TransMode_Ethernet.Enabled = !active;
+
             // 전송 중에는 상태 폴링을 멈춘다. 폴링과 OTA는 같은 소켓을 쓰므로 겹치면
             // 청크/ACK 스트림에 FWINFO?? 요청이 끼어들어 전송이 깨진다.
             // (이 메서드는 Task.Run으로 전송을 시작하기 '전에' UI 스레드에서 불리고,
@@ -727,7 +785,7 @@ namespace UI_Monitor
                     if (b == '\n') break;
                     if (b != '\r') sb.Append((char)b);
                 }
-                if (sb.Length > 0) AppendLog(sb.ToString() + "\r\n");
+                if (sb.Length > 0) AppendLog(sb.ToString() + "\r\n", LogCh.Eth);
             }
             catch (TimeoutException)
             {
@@ -736,7 +794,7 @@ namespace UI_Monitor
             catch (Exception ex)
             {
                 // 소켓이 끊긴 경우 — 폴링을 멈추고 연결 상태를 실제와 맞춘다.
-                AppendLog("[ERR] 상태 조회 실패: " + ex.Message + "\r\n");
+                AppendLog("[ERR] 상태 조회 실패: " + ex.Message + "\r\n", LogCh.Eth);
                 _infoTimer.Stop();
                 _tcp?.Dispose();
                 _tcp = null;
@@ -767,7 +825,7 @@ namespace UI_Monitor
 
                 PollFirmwareInfo();      // 접속 직후 1회 — 첫 표시까지 1초를 기다리지 않도록
                 _infoTimer.Start();
-                AppendLog($"[CONNECT] {ip}:{port} 연결됨\r\n");
+                AppendLog($"[CONNECT] {ip}:{port} 연결됨\r\n", LogCh.Eth);
             }
             catch (Exception ex)
             {
@@ -785,7 +843,7 @@ namespace UI_Monitor
             _tcp?.Dispose();
             _tcp = null;
             UpdateSocketConnState(false);
-            AppendLog("[DISCONNECT]\r\n");
+            AppendLog("[DISCONNECT]\r\n", LogCh.Eth);
         }
 
         /// <summary>소켓 연결 상태에 따라 Connect/Disconnect 버튼과 상태 표시줄을 갱신한다.</summary>

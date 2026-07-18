@@ -796,8 +796,8 @@
             this.Controls.Add(this.GroupBox_SocketSetting);
             this.Controls.Add(this.GroupBox_ComportSetting);
             this.Controls.Add(this.GroupBox_TransferMode);
-            this.Controls.Add(this.GroupBox_ViewerRS232);
             this.Controls.Add(this.GroupBox_ViewerEthernet);
+            this.Controls.Add(this.GroupBox_ViewerRS232);
             this.Name = "Form1";
             this.Text = "Form1";
             this.GroupBox_TransferMode.ResumeLayout(false);

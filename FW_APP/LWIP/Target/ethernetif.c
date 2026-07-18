@@ -38,7 +38,12 @@
 
 /* Private define ------------------------------------------------------------*/
 /* The time to block waiting for input. */
-#define TIME_WAITING_FOR_INPUT ( portMAX_DELAY )
+/* [수정] ST 기본값은 portMAX_DELAY(무한 대기)다. 그러면 RX 풀 고갈로 막혔을 때
+ * 아무도 깨워주지 않아 수신이 영구 정지한다(상세는 ethernetif_input 주석 참고).
+ * 100ms마다 깨어나 재시도하도록 유한값으로 바꾼다 — 최악의 경우에도 100ms 안에 자가 복구.
+ * 평상시에는 수신 인터럽트가 세마포어를 즉시 올리므로 이 타임아웃은 거의 쓰이지 않는다.
+ * ⚠️ USER CODE 블록 밖이라 CubeMX 재생성 시 되돌아간다(README §9 함정 목록 5번). */
+#define TIME_WAITING_FOR_INPUT ( pdMS_TO_TICKS(100) )
 /* Time to block waiting for transmissions to finish */
 #define ETHIF_TX_TIMEOUT (2000U)
 /* USER CODE BEGIN OS_THREAD_STACK_SIZE_WITH_RTOS */
@@ -102,7 +107,11 @@ typedef struct
 LWIP_MEMPOOL_DECLARE(RX_POOL, ETH_RX_BUFFER_CNT, sizeof(RxBuff_t), "Zero-copy RX PBUF pool");
 
 /* Variable Definitions */
-static uint8_t RxAllocStatus;
+/* [수정] volatile 추가. 이 플래그는 세 곳에서 만진다 —
+ *   쓰기: HAL_ETH_RxAllocateCallback(EthIf) / pbuf_free_custom(tcpip 또는 앱 태스크)
+ *   읽기: low_level_input, ethernetif_input(EthIf)
+ * 스레드를 건너 갱신되므로 컴파일러가 레지스터에 캐싱하면 안 된다(ST 원본은 빠져 있다). */
+static volatile uint8_t RxAllocStatus;
 
 ETH_DMADescTypeDef  DMARxDscrTab[ETH_RX_DESC_CNT]; /* Ethernet Rx DMA Descriptors */
 ETH_DMADescTypeDef  DMATxDscrTab[ETH_TX_DESC_CNT]; /* Ethernet Tx DMA Descriptors */
@@ -456,20 +465,41 @@ void ethernetif_input(void* argument)
 
   for( ;; )
   {
-    if (osSemaphoreAcquire(RxPktSemaphore, TIME_WAITING_FOR_INPUT) == osOK)
+    /* [수정] ST 원본은 (a) portMAX_DELAY로 무한 대기하고 (b) 세마포어를 받았을 때만
+     * 수신을 시도했다. 그 조합에서 아래 데드락이 실제로 발생했다:
+     *
+     *   1. 대량 수신(펌웨어 전송)으로 RX pbuf 풀 고갈
+     *   2. HAL_ETH_RxAllocateCallback 할당 실패 → RxAllocStatus = RX_ALLOC_ERROR
+     *   3. low_level_input()이 RX_ALLOC_OK가 아니면 즉시 NULL → do/while 탈출 → 무한 대기
+     *   4. 깨울 수 있는 건 ETH RX 인터럽트(디스크립터가 없어 오지 않음)와
+     *      pbuf_free_custom()뿐인데, 플래그가 세워진 시점에 이미 모든 pbuf가 반납된
+     *      뒤라면 pbuf_free_custom()이 다시 불릴 일이 없다 → 영구 정지
+     *
+     *   → MAC 수신이 죽어 ARP조차 응답하지 못한다(링크는 Up). 보드 리셋 외엔 복구 불가.
+     *
+     * 타임아웃만 유한값으로 바꾸는 것으론 부족하다. 타임아웃 시 osOK가 아니라서 원본은
+     * 수신 시도 자체를 건너뛰고, 들어간다 해도 RxAllocStatus가 ERROR인 채라 또 NULL이다.
+     * 그래서 '반환값과 무관하게 매번 재시도' + '막힌 플래그 해제'를 함께 둔다. */
+    (void)osSemaphoreAcquire(RxPktSemaphore, TIME_WAITING_FOR_INPUT);
+
+    /* 풀 고갈로 막혀 있었다면 풀어준다. 아직 비어 있으면 할당 콜백이 곧바로 다시
+     * ERROR로 되돌리므로 무해하다(재시도 비용만 든다). */
+    if (RxAllocStatus == RX_ALLOC_ERROR)
     {
-      do
-      {
-        p = low_level_input( netif );
-        if (p != NULL)
-        {
-          if (netif->input( p, netif) != ERR_OK )
-          {
-            pbuf_free(p);
-          }
-        }
-      } while(p!=NULL);
+      RxAllocStatus = RX_ALLOC_OK;
     }
+
+    do
+    {
+      p = low_level_input( netif );
+      if (p != NULL)
+      {
+        if (netif->input( p, netif) != ERR_OK )
+        {
+          pbuf_free(p);
+        }
+      }
+    } while(p!=NULL);
   }
 }
 
