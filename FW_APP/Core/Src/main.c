@@ -286,8 +286,16 @@ static void Tcp_Pet(void)
   Wdg_CheckIn(s_netWdgId);
 }
 
-static const FwTransport uartTransport = { Uart_Recv, Uart_Send, Uart_Pet };
-static const FwTransport tcpTransport  = { Tcp_Recv,  Tcp_Send,  Tcp_Pet  };
+/* 재부팅 직전 TCP 세션을 정상 종료한다(FIN). 상대가 '연결이 끊겼다'를 알아야
+ * 재전송을 멈추고, 그래야 리셋된 PHY가 조용한 매체에서 오토네고를 성공시킨다.
+ * 자세한 배경은 ota.h의 FwTransport 주석 참고. */
+static void Tcp_Quiesce(void)
+{
+  NetLink_CloseClient();
+}
+
+static const FwTransport uartTransport = { Uart_Recv, Uart_Send, Uart_Pet, NULL         };
+static const FwTransport tcpTransport  = { Tcp_Recv,  Tcp_Send,  Tcp_Pet,  Tcp_Quiesce  };
 
 /* USER CODE END 0 */
 

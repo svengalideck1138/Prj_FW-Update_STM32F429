@@ -78,15 +78,15 @@
             this.label_FW_Size = new System.Windows.Forms.Label();
             this.label2 = new System.Windows.Forms.Label();
             this.groupBox_FWUpdate = new System.Windows.Forms.GroupBox();
-            this.Btn_FW_Download = new System.Windows.Forms.Button();
+            this.Btn_ToFACTORY = new System.Windows.Forms.Button();
+            this.textBox_APP_Address = new System.Windows.Forms.TextBox();
+            this.textBox_FACT_Address = new System.Windows.Forms.TextBox();
             this.Btn_FACTORY_Download = new System.Windows.Forms.Button();
             this.label1 = new System.Windows.Forms.Label();
             this.label3 = new System.Windows.Forms.Label();
             this.textBox_FACTORY_FIle = new System.Windows.Forms.TextBox();
             this.Btn_FACTORY_Open = new System.Windows.Forms.Button();
-            this.textBox_FACT_Address = new System.Windows.Forms.TextBox();
-            this.textBox_APP_Address = new System.Windows.Forms.TextBox();
-            this.Btn_ToFACTORY = new System.Windows.Forms.Button();
+            this.Btn_FW_Download = new System.Windows.Forms.Button();
             this.GroupBox_TransferMode.SuspendLayout();
             this.GroupBox_ComportSetting.SuspendLayout();
             this.GroupBox_SocketSetting.SuspendLayout();
@@ -641,7 +641,7 @@
             this.Btn_FW_Open.Font = new System.Drawing.Font("Gulim", 9F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
             this.Btn_FW_Open.Location = new System.Drawing.Point(15, 100);
             this.Btn_FW_Open.Name = "Btn_FW_Open";
-            this.Btn_FW_Open.Size = new System.Drawing.Size(206, 23);
+            this.Btn_FW_Open.Size = new System.Drawing.Size(61, 23);
             this.Btn_FW_Open.TabIndex = 48;
             this.Btn_FW_Open.Text = "open";
             this.Btn_FW_Open.UseVisualStyleBackColor = true;
@@ -700,22 +700,40 @@
             this.groupBox_FWUpdate.TabStop = false;
             this.groupBox_FWUpdate.Text = "Firmware Update";
             // 
-            // Btn_FW_Download
+            // Btn_ToFACTORY
             // 
-            this.Btn_FW_Download.Font = new System.Drawing.Font("Gulim", 9F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
-            this.Btn_FW_Download.Location = new System.Drawing.Point(227, 100);
-            this.Btn_FW_Download.Name = "Btn_FW_Download";
-            this.Btn_FW_Download.Size = new System.Drawing.Size(144, 23);
-            this.Btn_FW_Download.TabIndex = 52;
-            this.Btn_FW_Download.Text = "F/W Download";
-            this.Btn_FW_Download.UseVisualStyleBackColor = true;
+            this.Btn_ToFACTORY.Font = new System.Drawing.Font("Gulim", 9F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
+            this.Btn_ToFACTORY.Location = new System.Drawing.Point(15, 140);
+            this.Btn_ToFACTORY.Name = "Btn_ToFACTORY";
+            this.Btn_ToFACTORY.Size = new System.Drawing.Size(398, 23);
+            this.Btn_ToFACTORY.TabIndex = 60;
+            this.Btn_ToFACTORY.Text = "FACTORY WORK";
+            this.Btn_ToFACTORY.UseVisualStyleBackColor = true;
+            // 
+            // textBox_APP_Address
+            // 
+            this.textBox_APP_Address.Enabled = false;
+            this.textBox_APP_Address.Font = new System.Drawing.Font("Gulim", 9F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
+            this.textBox_APP_Address.Location = new System.Drawing.Point(82, 73);
+            this.textBox_APP_Address.Name = "textBox_APP_Address";
+            this.textBox_APP_Address.Size = new System.Drawing.Size(101, 21);
+            this.textBox_APP_Address.TabIndex = 59;
+            // 
+            // textBox_FACT_Address
+            // 
+            this.textBox_FACT_Address.Enabled = false;
+            this.textBox_FACT_Address.Font = new System.Drawing.Font("Gulim", 9F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
+            this.textBox_FACT_Address.Location = new System.Drawing.Point(82, 19);
+            this.textBox_FACT_Address.Name = "textBox_FACT_Address";
+            this.textBox_FACT_Address.Size = new System.Drawing.Size(101, 21);
+            this.textBox_FACT_Address.TabIndex = 58;
             // 
             // Btn_FACTORY_Download
             // 
             this.Btn_FACTORY_Download.Font = new System.Drawing.Font("Gulim", 9F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
-            this.Btn_FACTORY_Download.Location = new System.Drawing.Point(227, 44);
+            this.Btn_FACTORY_Download.Location = new System.Drawing.Point(189, 44);
             this.Btn_FACTORY_Download.Name = "Btn_FACTORY_Download";
-            this.Btn_FACTORY_Download.Size = new System.Drawing.Size(144, 23);
+            this.Btn_FACTORY_Download.Size = new System.Drawing.Size(182, 23);
             this.Btn_FACTORY_Download.TabIndex = 57;
             this.Btn_FACTORY_Download.Text = "FACTORY Download";
             this.Btn_FACTORY_Download.UseVisualStyleBackColor = true;
@@ -753,38 +771,20 @@
             this.Btn_FACTORY_Open.Font = new System.Drawing.Font("Gulim", 9F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
             this.Btn_FACTORY_Open.Location = new System.Drawing.Point(15, 44);
             this.Btn_FACTORY_Open.Name = "Btn_FACTORY_Open";
-            this.Btn_FACTORY_Open.Size = new System.Drawing.Size(206, 23);
+            this.Btn_FACTORY_Open.Size = new System.Drawing.Size(61, 23);
             this.Btn_FACTORY_Open.TabIndex = 53;
             this.Btn_FACTORY_Open.Text = "open";
             this.Btn_FACTORY_Open.UseVisualStyleBackColor = true;
             // 
-            // textBox_FACT_Address
+            // Btn_FW_Download
             // 
-            this.textBox_FACT_Address.Enabled = false;
-            this.textBox_FACT_Address.Font = new System.Drawing.Font("Gulim", 9F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
-            this.textBox_FACT_Address.Location = new System.Drawing.Point(82, 19);
-            this.textBox_FACT_Address.Name = "textBox_FACT_Address";
-            this.textBox_FACT_Address.Size = new System.Drawing.Size(101, 21);
-            this.textBox_FACT_Address.TabIndex = 58;
-            // 
-            // textBox_APP_Address
-            // 
-            this.textBox_APP_Address.Enabled = false;
-            this.textBox_APP_Address.Font = new System.Drawing.Font("Gulim", 9F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
-            this.textBox_APP_Address.Location = new System.Drawing.Point(82, 73);
-            this.textBox_APP_Address.Name = "textBox_APP_Address";
-            this.textBox_APP_Address.Size = new System.Drawing.Size(101, 21);
-            this.textBox_APP_Address.TabIndex = 59;
-            // 
-            // Btn_ToFACTORY
-            // 
-            this.Btn_ToFACTORY.Font = new System.Drawing.Font("Gulim", 9F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
-            this.Btn_ToFACTORY.Location = new System.Drawing.Point(15, 140);
-            this.Btn_ToFACTORY.Name = "Btn_ToFACTORY";
-            this.Btn_ToFACTORY.Size = new System.Drawing.Size(398, 23);
-            this.Btn_ToFACTORY.TabIndex = 60;
-            this.Btn_ToFACTORY.Text = "FACTORY WORK";
-            this.Btn_ToFACTORY.UseVisualStyleBackColor = true;
+            this.Btn_FW_Download.Font = new System.Drawing.Font("Gulim", 9F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
+            this.Btn_FW_Download.Location = new System.Drawing.Point(189, 100);
+            this.Btn_FW_Download.Name = "Btn_FW_Download";
+            this.Btn_FW_Download.Size = new System.Drawing.Size(182, 23);
+            this.Btn_FW_Download.TabIndex = 52;
+            this.Btn_FW_Download.Text = "F/W Download";
+            this.Btn_FW_Download.UseVisualStyleBackColor = true;
             // 
             // Form1
             // 

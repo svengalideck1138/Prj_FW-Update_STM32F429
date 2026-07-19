@@ -125,11 +125,25 @@ bool UartLink_Send(const uint8_t *buf, uint32_t len)
   *           · IDLE → 실제 DMA 기록 위치
   *           · HT   → 항상 고정 RxXferSize/2 (실제 위치 아님)
   *           · TC   → 항상 고정 RxXferSize   (실제 위치 아님)
-  *         게다가 IDLE(USART3 IRQ)과 HT/TC(DMA1 IRQ)는 선점 우선순위가 같아 처리 순서가
-  *         뒤바뀔 수 있다. 그 경우 "IDLE로 lastPos=300이 된 뒤 HT가 256으로 들어옴"처럼
-  *         작아진 값이 오는데, 이를 랩어라운드로 오인하면 버퍼를 한 바퀴 통째로 다시 밀어
-  *         넣어 스트림이 영구히 어긋난다(재전송해도 복구 불가).
   *         → DMA 카운터에서 '진짜 위치'를 직접 계산하면 어떤 이벤트로 들어오든 항상 옳다.
+  *
+  * @note   ★ 아래 '위치 읽기 → push → s_lastPos 갱신'은 반드시 임계구역 안에서 해야 한다.
+  *         이 콜백은 서로 다른 두 인터럽트에서 불린다:
+  *           · IDLE  → USART3_IRQn      (우선순위 6, stm32f4xx_hal_msp.c)
+  *           · HT/TC → DMA1_Stream1_IRQn(우선순위 5, main.c)
+  *         HAL_Init()이 NVIC_PRIORITYGROUP_4(4비트 전부 선점)를 쓰므로 숫자가 작은
+  *         DMA(5)가 USART3(6) 핸들러를 '중간에 선점'한다. 보호가 없으면:
+  *           IDLE이 pos=300/lastPos=100을 읽고 push하는 도중 DMA가 선점
+  *           → DMA도 lastPos=100을 보고 같은 구간을 다시 push(중복 삽입), lastPos=310
+  *           → IDLE 복귀 후 lastPos=300으로 되돌림(후퇴)
+  *         결과는 스트림이 영구히 어긋나는 것이다. 증상은 '특정 오프셋에서 청크 CRC가
+  *         계속 실패하고 재전송을 해도 복구되지 않음'으로 나타난다.
+  *
+  *         우선순위를 같게 맞추는 것으로도 막을 수 있지만, 두 값 모두 CubeMX 생성
+  *         영역(USER CODE 밖)이라 재생성 한 번에 조용히 되돌아간다. 임계구역은 우선순위
+  *         설정과 무관하게 성립하므로 이쪽을 택했다.
+  *         (BASEPRI가 configLIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY=5로 올라가 5·6번
+  *          우선순위가 모두 차단된다. 보호 구간은 memcpy 한 번 수준으로 짧다.)
   */
 void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
 {
@@ -137,6 +151,8 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
   if (huart->Instance != USART3) return;
 
   BaseType_t woken = pdFALSE;
+
+  UBaseType_t saved = taskENTER_CRITICAL_FROM_ISR();
 
   /* 남은 전송 카운트 → 현재 기록 위치 (순환 DMA에서 항상 유효) */
   uint32_t remain = __HAL_DMA_GET_COUNTER(huart->hdmarx);
@@ -161,6 +177,8 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
     /* pos는 카운터에서 계산했으므로 항상 [0, UART_DMA_BUF_SZ-1] 범위다. */
     s_lastPos = pos;
   }
+
+  taskEXIT_CRITICAL_FROM_ISR(saved);
 
   portYIELD_FROM_ISR(woken);
 }

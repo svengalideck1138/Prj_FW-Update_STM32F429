@@ -29,6 +29,17 @@ namespace UI_Monitor
         // 앱 실행영역 시작 주소 (flash_if.h의 APP_ADDRESS와 일치)
         private const uint APP_BASE_ADDRESS = 0x08020000;
 
+        // 슬롯 크기 (flash_if.h의 APP_SIZE / STAGING_SIZE / FACTORY_SIZE — 셋 다 512KB로 동일).
+        // 이미지가 이보다 크면 MCU가 헤더 단계에서 NACK하고 Wdg_Panic으로 리셋해 버리므로,
+        // 보드를 건드리기 전에 PC에서 먼저 거른다.
+        private const uint SLOT_SIZE = 512u * 1024u;
+
+        // 이미지 선두 4바이트(초기 스택 포인터)의 유효 범위.
+        // 부트로더 BL_JumpToApplication()과 앱 Ota_RequestRollback()이 쓰는 것과 같은 기준 —
+        // 같은 판정을 PC에서 미리 해두면 헛된 전송과 그에 따른 롤백을 막을 수 있다.
+        private const uint RAM_START = 0x20000000;
+        private const uint RAM_END = 0x20030000;   // 0x20000000 + 192KB
+
         // [임시 테스트] true면 처음 몇 청크의 '첫 전송'에 일부러 틀린 CRC16을 보내 재전송을 유발.
         // 청크별 checksum + 자동 재전송이 동작하는지 확인용. (검증 완료 → 평소엔 false)
         private bool _debugCorruptFirstAttempt = false;
@@ -376,9 +387,22 @@ namespace UI_Monitor
 
                 try
                 {
-                    target = dlg.FileName.EndsWith(".hex", StringComparison.OrdinalIgnoreCase)
-                        ? ParseIntelHex(dlg.FileName, APP_BASE_ADDRESS)
-                        : PadTo4(File.ReadAllBytes(dlg.FileName));
+                    List<string> warnings = null;
+                    if (dlg.FileName.EndsWith(".hex", StringComparison.OrdinalIgnoreCase))
+                    {
+                        target = ParseIntelHex(dlg.FileName, APP_BASE_ADDRESS, out warnings);
+                    }
+                    else
+                    {
+                        // .bin은 주소 정보가 없어 슬롯 시작에 그대로 올라간다고 가정한다.
+                        // 검증은 .hex와 동일하게 걸어 잘못된 파일이 보드에 닿지 않게 한다.
+                        target = PadTo4(File.ReadAllBytes(dlg.FileName));
+                        ValidateImage(target);
+                    }
+
+                    if (warnings != null)
+                        foreach (string w in warnings)
+                            Log(LogCh.Auto, LogKind.Info, $"{slotName} 경고: {w}");
 
                     pathBox.Text = dlg.FileName;                          // 선택된 파일 경로 표시
                     sizeLabel.Text = $"{target.Length:N0} Byte";          // 파싱된 이미지 크기 표시
@@ -1013,56 +1037,159 @@ namespace UI_Monitor
         }
 
         /// <summary>Intel HEX 파일을 파싱해 baseAddress 기준 연속 바이너리로 변환한다.</summary>
-        private static byte[] ParseIntelHex(string path, uint baseAddress)
+        /// <param name="warnings">무시된 레코드 등 사용자에게 알릴 사항(치명적이지 않은 것)이 담긴다.</param>
+        /// <remarks>
+        /// 전체 CRC32는 <b>전송 경로</b>만 보호한다. 파일 자체가 깨진 경우(디스크/네트워크 손상)는
+        /// 레코드 체크섬만이 유일한 방어선이므로 반드시 검증한다 — 이걸 건너뛰면 깨진 이미지로
+        /// 계산한 CRC32가 MCU에서 그대로 통과해 손상된 펌웨어가 "DONE"으로 적용된다.
+        ///
+        /// 슬롯 범위 밖 레코드는 <b>오류가 아니라 무시</b>한다. ST 툴체인이 옵션바이트·OTP 영역
+        /// (0x1FFF_xxxx) 레코드를 붙이는 일이 드물지 않은데, 이걸 이미지에 포함시키면 크기가
+        /// 수백 MB로 폭주하고 MCU가 헤더를 NACK → Wdg_Panic → <b>멀쩡한 보드가 강제 롤백</b>된다.
+        /// </remarks>
+        private static byte[] ParseIntelHex(string path, uint baseAddress, out List<string> warnings)
         {
             var records = new List<KeyValuePair<uint, byte[]>>();
-            uint upper = 0;
+            uint addrOffset = 0;             // type 04(선형) 또는 type 02(세그먼트)가 정하는 주소 상위분
+            uint minAddr = uint.MaxValue;
             uint maxEnd = baseAddress;
-            bool any = false;
+            int lineNo = 0;
+            int ignored = 0;
+            bool sawEof = false;
+            warnings = new List<string>();
+
+            uint slotEnd = baseAddress + SLOT_SIZE;   // 경계(미포함)
 
             foreach (string raw in File.ReadAllLines(path))
             {
+                lineNo++;
                 string line = raw.Trim();
-                if (line.Length < 11 || line[0] != ':') continue;
+                if (line.Length == 0) continue;
+                if (line[0] != ':')
+                    throw new Exception($"{lineNo}번째 줄이 ':'로 시작하지 않습니다.");
+                if (line.Length < 11)
+                    throw new Exception($"{lineNo}번째 줄이 너무 짧습니다({line.Length}자).");
 
                 int len = Convert.ToInt32(line.Substring(1, 2), 16);
+
+                // 길이 필드와 실제 줄 길이의 일치 확인 (':' + len·addr·type 8자 + 데이터 + 체크섬 2자)
+                if (line.Length != 11 + len * 2)
+                    throw new Exception($"{lineNo}번째 줄의 길이가 맞지 않습니다. len={len}이면 {11 + len * 2}자여야 하는데 {line.Length}자입니다.");
+
+                // 레코드 체크섬: 모든 바이트(체크섬 포함)의 합의 하위 8비트가 0이어야 한다
+                int sum = 0;
+                for (int i = 1; i + 1 < line.Length; i += 2)
+                    sum += Convert.ToInt32(line.Substring(i, 2), 16);
+                if ((sum & 0xFF) != 0)
+                    throw new Exception($"{lineNo}번째 줄의 체크섬이 틀렸습니다. 파일이 손상되었습니다.");
+
                 int addr16 = Convert.ToInt32(line.Substring(3, 4), 16);
                 int type = Convert.ToInt32(line.Substring(7, 2), 16);
                 string dataHex = line.Substring(9, len * 2);
 
-                if (type == 0x00)          // 데이터 레코드
+                switch (type)
                 {
-                    uint abs = (upper << 16) + (uint)addr16;
-                    var data = new byte[len];
-                    for (int i = 0; i < len; i++)
-                        data[i] = Convert.ToByte(dataHex.Substring(i * 2, 2), 16);
-                    records.Add(new KeyValuePair<uint, byte[]>(abs, data));
-                    if (abs + (uint)len > maxEnd) maxEnd = abs + (uint)len;
-                    any = true;
+                    case 0x00:                                  // 데이터
+                        {
+                            uint abs = addrOffset + (uint)addr16;
+                            uint end = abs + (uint)len;         // 경계(미포함)
+
+                            if (end <= baseAddress || abs >= slotEnd)
+                            {
+                                ignored++;                      // 슬롯 밖(옵션바이트 등) → 조용히 제외
+                                break;
+                            }
+                            if (abs < baseAddress || end > slotEnd)
+                                throw new Exception(
+                                    $"{lineNo}번째 줄의 레코드(0x{abs:X8}~0x{end - 1:X8})가 " +
+                                    $"슬롯 경계(0x{baseAddress:X8}~0x{slotEnd - 1:X8})를 걸칩니다.");
+
+                            var data = new byte[len];
+                            for (int i = 0; i < len; i++)
+                                data[i] = Convert.ToByte(dataHex.Substring(i * 2, 2), 16);
+                            records.Add(new KeyValuePair<uint, byte[]>(abs, data));
+                            if (abs < minAddr) minAddr = abs;
+                            if (end > maxEnd) maxEnd = end;
+                            break;
+                        }
+
+                    case 0x02:                                  // 확장 세그먼트 주소 (<<4, <<16이 아님)
+                        if (len != 2) throw new Exception($"{lineNo}번째 줄: type 02의 길이는 2여야 합니다.");
+                        addrOffset = (uint)Convert.ToInt32(dataHex, 16) << 4;
+                        break;
+
+                    case 0x04:                                  // 확장 선형 주소 (상위 16비트)
+                        if (len != 2) throw new Exception($"{lineNo}번째 줄: type 04의 길이는 2여야 합니다.");
+                        addrOffset = (uint)Convert.ToInt32(dataHex, 16) << 16;
+                        break;
+
+                    case 0x03:                                  // 시작 세그먼트 주소 — 진입점은 MCU가 벡터에서 얻는다
+                    case 0x05:                                  // 시작 선형 주소 — 위와 같음
+                        break;
+
+                    case 0x01:                                  // EOF
+                        sawEof = true;
+                        break;
+
+                    default:
+                        throw new Exception($"{lineNo}번째 줄: 알 수 없는 레코드 타입 0x{type:X2}입니다.");
                 }
-                else if (type == 0x04)     // 확장 선형 주소 (상위 16비트)
-                {
-                    upper = (uint)Convert.ToInt32(dataHex, 16);
-                }
-                else if (type == 0x01)     // EOF
-                {
-                    break;
-                }
+
+                if (sawEof) break;
             }
 
-            if (!any) throw new Exception("데이터 레코드가 없습니다.");
+            if (!sawEof) throw new Exception("EOF 레코드(:00000001FF)가 없습니다. 파일이 잘렸을 수 있습니다.");
+            if (records.Count == 0) throw new Exception("슬롯 범위 안에 데이터 레코드가 없습니다.");
+
+            if (ignored > 0)
+                warnings.Add($"슬롯(0x{baseAddress:X8}~0x{slotEnd - 1:X8}) 밖의 레코드 {ignored}개를 제외했습니다.");
+
+            // 이미지는 반드시 슬롯 시작에서 출발해야 한다. 앞이 비어 있으면 그 자리가 0xFF로 채워지고,
+            // 선두 4바이트(초기 SP)가 0xFFFFFFFF가 되어 부트로더가 무효 판정 → 롤백으로 이어진다.
+            if (minAddr != baseAddress)
+                throw new Exception(
+                    $"이미지가 0x{minAddr:X8}에서 시작합니다. 슬롯 시작(0x{baseAddress:X8})과 달라 " +
+                    "링커 스크립트의 FLASH ORIGIN을 확인해야 합니다.");
 
             uint size = (maxEnd - baseAddress + 3u) & ~3u;   // 4바이트 정렬
             var image = new byte[size];
             for (int i = 0; i < image.Length; i++) image[i] = 0xFF;   // 빈 공간 0xFF
 
+            var written = new bool[size];
             foreach (var rec in records)
             {
-                if (rec.Key < baseAddress)
-                    throw new Exception($"주소 0x{rec.Key:X8}가 앱 시작(0x{baseAddress:X8})보다 낮습니다.");
-                Array.Copy(rec.Value, 0, image, (int)(rec.Key - baseAddress), rec.Value.Length);
+                int off = (int)(rec.Key - baseAddress);
+                for (int i = 0; i < rec.Value.Length; i++)
+                {
+                    if (written[off + i])
+                        throw new Exception($"주소 0x{rec.Key + (uint)i:X8}를 두 레코드가 중복해서 정의합니다.");
+                    written[off + i] = true;
+                }
+                Array.Copy(rec.Value, 0, image, off, rec.Value.Length);
             }
+
+            ValidateImage(image);
             return image;
+        }
+
+        /// <summary>
+        /// 전송 전에 이미지가 이 슬롯에서 실제로 부팅 가능한 모양인지 확인한다.
+        /// 부트로더 BL_JumpToApplication() / 앱 Ota_RequestRollback()과 같은 판정 기준을 쓴다.
+        /// </summary>
+        private static void ValidateImage(byte[] image)
+        {
+            if (image.Length == 0)
+                throw new Exception("이미지가 비어 있습니다.");
+            if (image.Length > SLOT_SIZE)
+                throw new Exception($"이미지 크기 {image.Length:N0} 바이트가 슬롯 크기 {SLOT_SIZE:N0} 바이트를 넘습니다.");
+            if (image.Length < 8)
+                throw new Exception("이미지가 너무 작습니다(벡터 테이블 최소 8바이트).");
+
+            uint sp = BitConverter.ToUInt32(image, 0);
+            if (sp < RAM_START || sp > RAM_END)
+                throw new Exception(
+                    $"선두 4바이트(초기 스택 포인터)가 0x{sp:X8}로 RAM 범위" +
+                    $"(0x{RAM_START:X8}~0x{RAM_END:X8}) 밖입니다. 이 슬롯용으로 링크된 펌웨어가 아닙니다.");
         }
 
         /// <summary>길이를 4바이트 배수로 맞춰(0xFF 패딩) 반환한다.</summary>

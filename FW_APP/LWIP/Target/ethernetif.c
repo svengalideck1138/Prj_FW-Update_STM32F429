@@ -56,7 +56,66 @@ static void EthDbg_Link(const char *where, int32_t state, uint32_t applied)
                                                Dbg_Puts(")");                break;
   }
   if (applied) { Dbg_Puts("  -> MAC applied"); }
-  else         { Dbg_Puts("  -> MAC unchanged (link kept down)"); }
+  else         { Dbg_Puts("  -> (no MAC change)"); }
+  Dbg_Puts("\r\n");
+}
+
+/* 아래에서 정의되는 PHY 객체 (여기서 쓰기 위해 앞당겨 선언) */
+extern lan8742_Object_t LAN8742;
+
+/* 링크 스레드는 100ms 주기다. 오토네고는 보통 2~3초에 끝나므로 5초를 기다린 뒤
+ * 재협상을 건다(정상 협상 중에 끼어들어 오히려 깨뜨리지 않도록 넉넉히 잡았다). */
+#define ETH_RENEGO_AFTER_POLLS   50U   /* 50 × 100ms = 5초 */
+#define ETH_RENEGO_MAX_TRIES      3U   /* 케이블이 빠진 경우 무한 재시도/로그 방지 */
+
+/**
+  * @brief  PHY를 '알려진 좋은 상태'로 되돌리고 오토네고를 다시 시작시킨다.
+  *
+  * @note   ★ 왜 필요한가 (실측 증상 기반).
+  *         TCP로 OTA/롤백을 하면 재부팅 후 RJ45 링크 LED가 안 켜지는 일이 잦았다.
+  *         UART로 같은 일을 하면 발생하지 않는다. 로그를 보면 실패 구간에서 PHY가
+  *         `100M-HALF` / `10M-HALF`로 붙는다 — **half duplex는 오토네고가 실패해
+  *         parallel detect로 폴백했다는 signature다**(parallel detect는 속도만 알 수
+  *         있어 duplex를 항상 half로 둔다). 더 나쁘면 링크 자체가 안 맺힌다.
+  *
+  *         원인: 보드의 SB177로 PHY의 nRST가 MCU NRST에 직결되어 있어(UM1974 p.32)
+  *         NVIC_SystemReset()이 PHY도 하드웨어 리셋한다. 그런데 TCP 경로에서는 소켓을
+  *         닫지 않고 리셋하므로 상대 PC가 재전송을 계속 쏘고 있고, 그 와중에 리셋에서
+  *         나온 PHY가 오토네고(FLP 버스트)를 시작하려다 협상이 깨진다.
+  *
+  *         그리고 이 펌웨어는 원래 **PHY 레지스터에 쓰기를 단 한 번도 하지 않았다.**
+  *         (LAN8742_Init()은 주소 스캔만 하고 소프트 리셋을 하지 않는다 — 아래
+  *          low_level_init의 옛 주석이 이 점을 잘못 적고 있었다.) 그래서 한 번 잘못
+  *         협상되면 스스로 빠져나올 방법이 없었다.
+  *
+  * @note   POWER_DOWN / ISOLATE / LOOPBACK을 명시적으로 해제한다. 리셋 펄스가 짧아
+  *         PHY가 MODE 스트랩을 잘못 래치하면 파워다운으로 기동할 수 있는데, 그 경우
+  *         링크도 LED도 영영 안 살아난다. 여기서 걷어내면 소프트웨어만으로 회복된다.
+  *
+  * @note   LAN8742_StartAutoNego()를 쓰지 않는 이유: 그 함수는 AUTONEGO_EN만 세우고
+  *         RESTART_AUTONEGO를 세우지 않아 '이미 실패한 협상'을 다시 시작시키지 못한다.
+  */
+static void EthPhy_Recover(const char *why)
+{
+  uint32_t bcr = 0U;
+
+  if (LAN8742.IO.ReadReg(LAN8742.DevAddr, LAN8742_BCR, &bcr) < 0)
+  {
+    Dbg_Puts("[ETH] phy recover FAILED (MDIO read)\r\n");
+    return;
+  }
+
+  bcr &= ~((uint32_t)(LAN8742_BCR_POWER_DOWN | LAN8742_BCR_ISOLATE | LAN8742_BCR_LOOPBACK));
+  bcr |=  (uint32_t)(LAN8742_BCR_AUTONEGO_EN | LAN8742_BCR_RESTART_AUTONEGO);
+
+  if (LAN8742.IO.WriteReg(LAN8742.DevAddr, LAN8742_BCR, bcr) < 0)
+  {
+    Dbg_Puts("[ETH] phy recover FAILED (MDIO write)\r\n");
+    return;
+  }
+
+  Dbg_Puts("[ETH] phy autoneg restarted - ");
+  Dbg_Puts(why);
   Dbg_Puts("\r\n");
 }
 /* USER CODE END 0 */
@@ -316,79 +375,36 @@ static void low_level_init(struct netif *netif)
 
   if (hal_eth_init_status == HAL_OK)
   {
+    /* [수정] 여기서 링크를 올리지 않는다 — 무조건 down으로 두고 나간다.
+     *
+     * ST 원본은 GetLinkState()를 곧바로 읽어 그 값으로 MAC을 설정하고 링크를 올렸다.
+     * 그런데 이 시점은 부팅 직후라 오토네고가 끝나지 않았거나(2~3초 소요), 협상이
+     * 실패해 parallel detect 결과(100M-HALF / 10M-HALF)가 나와 있기 쉽다.
+     *
+     * 그 값을 그대로 래치하면 치명적이다. netif가 up이 되는 순간
+     * ethernet_link_thread의 두 분기가 **둘 다 막히기 때문이다**:
+     *   · 첫 if   : 링크가 끊겨야(PHYLinkState <= LINK_DOWN) 진입
+     *   · else if : netif가 down이어야 진입
+     * 즉 한번 잘못된 속도로 올려두면 **영원히 재평가되지 않는다.**
+     * (실측: `[ETH] init phy=10M-HALF -> MAC applied` 이후 20초 넘게 [ETH] 로그가
+     *  단 한 줄도 안 나온다 = 그 상태로 고착.)
+     *
+     * → 판단을 전부 링크 스레드에 위임한다. 100ms 뒤 첫 폴에서 올바른 속도로 올려주고,
+     *   아래 ③의 재평가/재협상 로직이 이후로도 계속 따라간다.
+     *   부팅이 100ms 늦어지는 것뿐이고, 그 대가로 래치 경합이 통째로 사라진다. */
+    (void)speed; (void)duplex; (void)speedKnown; (void)MACConf;
+
+    /* 리셋에서 갓 나온 PHY를 알려진 좋은 상태로 만들고 협상을 처음부터 시작시킨다.
+     * (파워다운 스트랩 오래치 / 직전 세션이 남긴 실패한 협상에서 확실히 벗어난다) */
+    EthPhy_Recover("boot");
+
     PHYLinkState = LAN8742_GetLinkState(&LAN8742);
-
-    /* Get link state */
-    if(PHYLinkState <= LAN8742_STATUS_LINK_DOWN)
-    {
-      netif_set_link_down(netif);
-      netif_set_down(netif);
-    }
-    else
-    {
-      switch (PHYLinkState)
-      {
-      case LAN8742_STATUS_100MBITS_FULLDUPLEX:
-        duplex = ETH_FULLDUPLEX_MODE;
-        speed = ETH_SPEED_100M;
-        speedKnown = 1U;
-        break;
-      case LAN8742_STATUS_100MBITS_HALFDUPLEX:
-        duplex = ETH_HALFDUPLEX_MODE;
-        speed = ETH_SPEED_100M;
-        speedKnown = 1U;
-        break;
-      case LAN8742_STATUS_10MBITS_FULLDUPLEX:
-        duplex = ETH_FULLDUPLEX_MODE;
-        speed = ETH_SPEED_10M;
-        speedKnown = 1U;
-        break;
-      case LAN8742_STATUS_10MBITS_HALFDUPLEX:
-        duplex = ETH_HALFDUPLEX_MODE;
-        speed = ETH_SPEED_10M;
-        speedKnown = 1U;
-        break;
-      default:
-        /* [수정] ST 원본은 여기서 "100M 풀듀플렉스"로 **추측**하고 그대로 링크를 올렸다.
-         *
-         * 바로 위 LAN8742_Init()이 PHY를 리셋하고 오토네고를 다시 시작하는데, 그건
-         * 2~3초가 걸린다. 그런데 GetLinkState()를 곧바로 읽으므로 대개 아직
-         * AUTONEGO_NOTDONE(6)이고, case에 없으니 이 default로 떨어진다.
-         *
-         * 문제는 추측한 뒤 netif_set_link_up()까지 부른다는 것이다. 그러면
-         * ethernet_link_thread의 재평가 조건(!netif_is_link_up)에 다시는 걸리지 않아,
-         * 실제 협상이 10M로 끝나도 MAC은 100M인 채 고착된다
-         * → 링크는 Up인데 프레임을 못 받는다(ARP조차 무응답). 리셋으로만 복구.
-         *
-         * → 모르면 올리지 않는다. 링크를 down으로 둔 채 두면 100ms 뒤 링크 스레드가
-         *   협상 완료를 보고 올바른 속도로 올려준다. */
-        break;
-      }
-
-    if (speedKnown)
-    {
-      /* Get MAC Config MAC */
-      HAL_ETH_GetMACConfig(&heth, &MACConf);
-      MACConf.DuplexMode = duplex;
-      MACConf.Speed = speed;
-      HAL_ETH_SetMACConfig(&heth, &MACConf);
-
-      HAL_ETH_Start_IT(&heth);
-      netif_set_up(netif);
-      netif_set_link_up(netif);
-    }
-    else
-    {
-      /* 아직 속도를 모른다 — 링크 스레드가 협상 완료 후 올린다. */
-      netif_set_down(netif);
-      netif_set_link_down(netif);
-    }
-    EthDbg_Link("init ", PHYLinkState, speedKnown);
+    netif_set_down(netif);
+    netif_set_link_down(netif);
+    EthDbg_Link("init ", PHYLinkState, 0U);
 /* USER CODE BEGIN PHY_POST_CONFIG */
 
 /* USER CODE END PHY_POST_CONFIG */
-    }
-
   }
   else
   {
@@ -863,7 +879,16 @@ void ethernet_link_thread(void* argument)
 
   struct netif *netif = (struct netif *) argument;
 /* USER CODE BEGIN ETH link init */
+  /* 현재 MAC에 실제로 적용되어 있는 속도/듀플렉스. PHY가 재협상으로 값을 바꿨을 때
+   * '달라졌는지'를 판단하려면 적용값을 따로 들고 있어야 한다(netif의 up/down만으로는
+   * 알 수 없다 — 그게 기존 고착 버그의 원인이었다). */
+  static uint32_t s_appliedSpeed  = 0U;
+  static uint32_t s_appliedDuplex = 0U;
+  static uint32_t s_appliedValid  = 0U;
 
+  /* 링크가 안 올라온 채로 몇 번 폴링했는지 / 재협상을 몇 번 시도했는지 */
+  static uint32_t s_downPolls     = 0U;
+  static uint32_t s_recoverTries  = 0U;
 /* USER CODE END ETH link init */
 
   for(;;)
@@ -889,52 +914,86 @@ void ethernet_link_thread(void* argument)
    *   아니면 netif를 down인 채로 두고 100ms 뒤 다시 시도한다. */
   linkchanged = 0U;
 
+  /* PHY가 보고한 상태를 MAC 설정값으로 변환한다. 유효한 링크일 때만 linkchanged=1.
+   * (AUTONEG_NOTDONE / LINK_DOWN / 읽기 오류는 전부 '아직 모름'으로 남긴다) */
+  switch (PHYLinkState)
+  {
+  case LAN8742_STATUS_100MBITS_FULLDUPLEX:
+    duplex = ETH_FULLDUPLEX_MODE;  speed = ETH_SPEED_100M;  linkchanged = 1;  break;
+  case LAN8742_STATUS_100MBITS_HALFDUPLEX:
+    duplex = ETH_HALFDUPLEX_MODE;  speed = ETH_SPEED_100M;  linkchanged = 1;  break;
+  case LAN8742_STATUS_10MBITS_FULLDUPLEX:
+    duplex = ETH_FULLDUPLEX_MODE;  speed = ETH_SPEED_10M;   linkchanged = 1;  break;
+  case LAN8742_STATUS_10MBITS_HALFDUPLEX:
+    duplex = ETH_HALFDUPLEX_MODE;  speed = ETH_SPEED_10M;   linkchanged = 1;  break;
+  default:
+    break;
+  }
+
   if(netif_is_link_up(netif) && (PHYLinkState <= LAN8742_STATUS_LINK_DOWN))
   {
     HAL_ETH_Stop_IT(&heth);
     netif_set_down(netif);
     netif_set_link_down(netif);
+    s_appliedValid = 0U;                 /* 적용값 무효화 */
     EthDbg_Link("down ", PHYLinkState, 0U);
   }
-  else if(!netif_is_link_up(netif) && (PHYLinkState > LAN8742_STATUS_LINK_DOWN))
+  else if(!netif_is_link_up(netif) && linkchanged)
   {
-    switch (PHYLinkState)
-    {
-    case LAN8742_STATUS_100MBITS_FULLDUPLEX:
-      duplex = ETH_FULLDUPLEX_MODE;
-      speed = ETH_SPEED_100M;
-      linkchanged = 1;
-      break;
-    case LAN8742_STATUS_100MBITS_HALFDUPLEX:
-      duplex = ETH_HALFDUPLEX_MODE;
-      speed = ETH_SPEED_100M;
-      linkchanged = 1;
-      break;
-    case LAN8742_STATUS_10MBITS_FULLDUPLEX:
-      duplex = ETH_FULLDUPLEX_MODE;
-      speed = ETH_SPEED_10M;
-      linkchanged = 1;
-      break;
-    case LAN8742_STATUS_10MBITS_HALFDUPLEX:
-      duplex = ETH_HALFDUPLEX_MODE;
-      speed = ETH_SPEED_10M;
-      linkchanged = 1;
-      break;
-    default:
-      break;
-    }
+    /* Get MAC Config MAC */
+    HAL_ETH_GetMACConfig(&heth, &MACConf);
+    MACConf.DuplexMode = duplex;
+    MACConf.Speed = speed;
+    HAL_ETH_SetMACConfig(&heth, &MACConf);
+    HAL_ETH_Start_IT(&heth);
+    netif_set_up(netif);
+    netif_set_link_up(netif);
+    s_appliedSpeed = speed;  s_appliedDuplex = duplex;  s_appliedValid = 1U;
+    EthDbg_Link("up   ", PHYLinkState, 1U);
+  }
+  else if(netif_is_link_up(netif) && linkchanged && s_appliedValid &&
+          ((speed != s_appliedSpeed) || (duplex != s_appliedDuplex)))
+  {
+    /* ★ [추가] 링크는 유지된 채 속도/듀플렉스만 재협상된 경우.
+     *
+     * 원래 코드에는 이 경로가 아예 없었다. 위 두 분기는 각각 '링크 상실'과
+     * 'netif가 down'일 때만 도는데, 링크가 up인 채 PHY만 100M→10M로 바뀌면
+     * 어느 쪽에도 걸리지 않아 **MAC이 옛 설정에 영구 고착**된다
+     * → 링크는 Up인데 프레임을 못 받는다(ARP조차 무응답).
+     *
+     * 파일 아래쪽 [진단] 블록의 주석이 "지금 구조에서는 아무도 이걸 보지 않는다"고
+     * 적어둔 바로 그 구멍이다. 이 분기가 그것을 닫는다. */
+    HAL_ETH_Stop_IT(&heth);
+    HAL_ETH_GetMACConfig(&heth, &MACConf);
+    MACConf.DuplexMode = duplex;
+    MACConf.Speed = speed;
+    HAL_ETH_SetMACConfig(&heth, &MACConf);
+    HAL_ETH_Start_IT(&heth);
+    s_appliedSpeed = speed;  s_appliedDuplex = duplex;
+    EthDbg_Link("respd", PHYLinkState, 1U);
+  }
 
-    if(linkchanged)
+  /* ★ [추가] 링크가 오래 안 올라오면 오토네고를 다시 건다.
+   *
+   * PHY는 보통 협상 실패 시 스스로 재시도하지만, 파워다운 스트랩 오래치나 협상이
+   * 어긋난 상태로는 영영 안 올라온다(실측: TCP OTA 후 LED 꺼진 채 통신 불가).
+   * 이 펌웨어에는 원래 PHY를 되살릴 수단이 전혀 없었다 — 그 마지막 방어선이다.
+   *
+   * 케이블이 그냥 빠져 있는 경우에도 여기 걸리므로, 링크가 한 번 올라올 때까지
+   * 시도 횟수를 제한해 로그·MDIO 트래픽이 무한히 쌓이지 않게 한다. */
+  if (linkchanged)
+  {
+    s_downPolls = 0U;
+    s_recoverTries = 0U;
+  }
+  else
+  {
+    s_downPolls++;
+    if ((s_downPolls >= ETH_RENEGO_AFTER_POLLS) && (s_recoverTries < ETH_RENEGO_MAX_TRIES))
     {
-      /* Get MAC Config MAC */
-      HAL_ETH_GetMACConfig(&heth, &MACConf);
-      MACConf.DuplexMode = duplex;
-      MACConf.Speed = speed;
-      HAL_ETH_SetMACConfig(&heth, &MACConf);
-      HAL_ETH_Start_IT(&heth);
-      netif_set_up(netif);
-      netif_set_link_up(netif);
-      EthDbg_Link("up   ", PHYLinkState, 1U);
+      s_downPolls = 0U;
+      s_recoverTries++;
+      EthPhy_Recover("link down too long");
     }
   }
 

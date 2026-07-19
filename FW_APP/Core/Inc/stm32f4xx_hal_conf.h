@@ -228,8 +228,18 @@
 /* PHY Configuration delay */
 #define PHY_CONFIG_DELAY                0x00000FFFU
 
-#define PHY_READ_TO                     0x0000FFFFU
-#define PHY_WRITE_TO                    0x0000FFFFU
+/* MDIO 트랜잭션 1회의 타임아웃(ms). HAL_ETH_ReadPHYRegister/WritePHYRegister가
+ * HAL_GetTick() 기반으로 그대로 쓴다(stm32f4xx_hal_eth.c의 MACMIIAR.MB 폴링 루프).
+ *
+ * ⚠️ CubeMX 기본값은 0xFFFF = 65,535ms = 65.5초다. 즉 MDIO가 한 번 물리면
+ *    EthLink 스레드가 1분 넘게 블로킹된다. 게다가 EthLink는 워치독 등록 대상이
+ *    아니어서(main.c의 Wdg_Register는 led/uart/net 3개뿐) 아무도 감지하지 못한다
+ *    → 링크 관리와 PHY 재협상 복구가 조용히 멎는다.
+ *
+ * MDC는 HCLK 180MHz에서 /102 분주라 약 1.8MHz이고, MDIO 프레임은 64비트이므로
+ * 정상 트랜잭션은 40us 미만이다. 100ms면 2000배가 넘는 마진이다. */
+#define PHY_READ_TO                     100U
+#define PHY_WRITE_TO                    100U
 
 /* Section 3: Common PHY Registers */
 

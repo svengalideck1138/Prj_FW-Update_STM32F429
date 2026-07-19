@@ -89,9 +89,11 @@ static bool ota_recv_header(OtaSession *s)
   * @brief  2) 대상 영역 소거 — 반드시 '섹터 단위'로 쪼갠다.
   *
   * 한 번의 FlashIf_EraseRange로 최대 4섹터를 지우면 128KB 섹터당 typ 1s / max 4s이므로
-  * 최악 16초 동안 블로킹된다. 그동안 체크인이 없으면 워치독이 먼저 물어버린다
-  * (앱이 작을 때는 1섹터로 끝나 우연히 문제가 없었다).
-  * 섹터마다 체크인하면 각 구간이 1섹터 시간으로 제한된다.
+  * 최악 16초 동안 블로킹된다. 섹터마다 쪼개면 각 구간이 1섹터 시간으로 제한된다.
+  *
+  * 여기서 쪼개는 목적은 **태스크 체크인과 CPU 양보**다. 워치독(IWDG) 자체는 별개 문제이며
+  * FlashIf_EraseSectorFromRam()이 RAM에서 폴링하며 갱신하므로 소거 시간과 무관하게 안전하다
+  * (자세한 배경은 flash_if.c의 해당 함수 주석 참고).
   *
   * @retval 성공 시 ACK까지 보내고 true. 실패하면 NACK를 보내고 false.
   */
@@ -102,11 +104,9 @@ static bool ota_erase(OtaSession *s)
 
   for (uint32_t a = s->baseAddr; a <= endAddr; a = FlashIf_NextSectorAddr(a))
   {
-    /* Factory는 앱이 실행되는 Bank1을 포함한다. 그 구간을 지우는 동안에는 명령어 인출이
-     * 멈춰 어떤 태스크도(감시 태스크조차) 돌지 못하므로, 체크인만으로는 워치독을 막을 수
-     * 없다. LSI로 독립 구동되는 IWDG는 계속 카운트하므로 '직접' 갱신해 창을 새로 연다.
-     * (Staging은 Bank2라 해당 없지만, 무해하므로 구분 없이 갱신한다) */
-    IWDG->KR = 0x0000AAAAU;
+    /* 워치독 자체는 FlashIf_EraseSectorFromRam()이 책임진다 — 소거 중 BSY 폴링 루프가
+     * RAM에서 돌며 IWDG를 계속 갱신하므로, 섹터 소거가 얼마나 걸리든 물리지 않는다.
+     * 여기서 하는 것은 '태스크 체크인'뿐이다(둘은 다른 문제다. 아래 osDelay 주석 참고). */
     s->t->pet();                                  /* 섹터마다 체크인 */
 
     if (FlashIf_EraseRange(a, a) != FLASH_IF_OK)  /* a가 속한 섹터 1개만 소거 */
@@ -116,7 +116,7 @@ static bool ota_erase(OtaSession *s)
     }
 
     /* ★ 섹터 사이에서 반드시 양보한다.
-     * HAL_FLASHEx_Erase는 BSY를 busy-wait 폴링하므로 CPU를 놓지 않는다. 이 태스크
+     * 소거 루틴은 BSY를 busy-wait 폴링하므로 CPU를 놓지 않는다. 이 태스크
      * (Normal)보다 낮은 ledTask(Low)는 그동안 아예 스케줄되지 못해 체크인이 끊기고,
      * 여러 섹터를 연속 소거하면 그 굶주림이 수 초~십수 초로 누적된다.
      * osDelay(1)로 한 틱 양보하면 낮은 우선순위 태스크가 밀린 체크인을 처리할 수 있어,
@@ -124,7 +124,6 @@ static bool ota_erase(OtaSession *s)
     osDelay(1);
   }
 
-  IWDG->KR = 0x0000AAAAU;
   s->t->pet();
 
   if (!eraseOk)
@@ -283,6 +282,16 @@ static void ota_finish(OtaSession *s)
     uint32_t t0 = HAL_GetTick();
     while ((HAL_GetTick() - t0) < 150U) { s->t->pet(); }
   }
+
+  /* 전송 계층을 조용히 만든 뒤 리셋한다(TCP면 소켓 정상 종료). 그냥 리셋하면 상대가
+   * 재전송을 계속 쏘는 와중에 PHY가 하드웨어 리셋돼 오토네고가 깨진다 — 재부팅 후
+   * 링크 LED가 안 켜지던 원인. 자세한 내용은 ota.h의 FwTransport 주석 참고. */
+  if (s->t->quiesce != NULL) { s->t->quiesce(); }
+  {
+    uint32_t t0 = HAL_GetTick();
+    while ((HAL_GetTick() - t0) < 100U) { s->t->pet(); }   /* FIN이 나갈 시간 */
+  }
+
   NVIC_SystemReset();      /* 재부팅 (돌아오지 않음) */
 }
 
@@ -436,6 +445,13 @@ void Ota_RequestRollback(const FwTransport *t)
   {
     uint32_t t0 = HAL_GetTick();
     while ((HAL_GetTick() - t0) < 150U) { t->pet(); }
+  }
+
+  /* 리셋 전에 전송 계층을 조용히 만든다 — ota_finish와 같은 이유(ota.h 주석 참고). */
+  if (t->quiesce != NULL) { t->quiesce(); }
+  {
+    uint32_t t0 = HAL_GetTick();
+    while ((HAL_GetTick() - t0) < 100U) { t->pet(); }   /* FIN이 나갈 시간 */
   }
 
   NVIC_SystemReset();   /* 돌아오지 않음 */

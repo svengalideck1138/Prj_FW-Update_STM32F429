@@ -39,7 +39,7 @@ extern "C" {
 #define FW_VARIANT_FACTORY    3
 #define FW_VARIANT_APP02_BAD  4
 
-#define FW_VARIANT           FW_VARIANT_APP02     /* ← 여기만 바꾼다 */
+#define FW_VARIANT           FW_VARIANT_FACTORY     /* ← 여기만 바꾼다 */
 
 /* 변형에 따라 버전 문자열이 자동으로 정해진다(오타/불일치 방지) */
 #if   (FW_VARIANT == FW_VARIANT_APP01)
