@@ -359,8 +359,6 @@ __enable_irq();
 
 ### 안정성 보강 요약
 
-기능이 다 돌아간 뒤, "가끔 실패한다"에 해당하는 것들을 잡은 작업이다. 넷 다 **정상 동작할 때는 아무 차이가 없고, 특정 타이밍·개체·입력에서만 드러나던 것**이라 증상만 보고는 원인에 도달하기 어려웠다. 각 항목의 증상·원인·조치는 §10 표에 있다.
-
 | # | 대상 | 한 줄 요약 |
 |---|---|---|
 | 11a | `UI_Monitor/Form1.cs` | HEX 레코드 체크섬·슬롯 경계·시작 주소·초기 SP를 **보드에 보내기 전에** 검증. 슬롯 밖(옵션바이트 등) 레코드는 경고 후 제외 |
@@ -381,19 +379,6 @@ __enable_irq();
 | 4b | **`stm32f4xx_hal_conf.h`의 `PHY_READ_TO` / `PHY_WRITE_TO`** | 기본값 `0x0000FFFF` = **65.5초**로 되돌아간다. MDIO가 한 번 물리면 `EthLink` 스레드가 1분 넘게 블로킹되는데, **EthLink는 워치독 등록 대상이 아니라**(`Wdg_Register`는 led/uart/net 3개뿐) 아무도 감지하지 못한다 → 링크 관리와 PHY 재협상 복구가 조용히 멎는다 | 둘 다 `100U`인지 확인. MDC ~1.8MHz에서 정상 MDIO 트랜잭션은 40us 미만이라 마진이 2000배가 넘는다. (FW_BOOT 쪽 같은 정의는 `HAL_ETH_MODULE_ENABLED`가 꺼져 있어 죽은 값이므로 무시해도 된다) |
 | 5 | **`ethernetif.c`의 수정 6곳** (Ethernet 수신·링크 관련) | 되돌아가면 **Ethernet 수신이 이따금 죽는다** — 링크는 Up인데 ARP조차 무응답, 리셋으로만 복구. e·f가 되돌아가면 **TCP OTA 후 링크 LED가 안 켜지는 증상이 부활한다** | 아래 6개가 모두 살아 있는지 확인. **전부 USER CODE 블록 밖이다** (바로 위 `INTERFACE_THREAD_STACK_SIZE`와 `EthDbg_Link`/`EthPhy_Recover`는 안이라 유지된다) |
 
-**§9-5 상세 — `ethernetif.c`에서 확인할 6곳**
-
-| # | 위치 | 있어야 할 것 | 없으면 |
-|---|---|---|---|
-| a | `TIME_WAITING_FOR_INPUT` | `pdMS_TO_TICKS(100)` (원본은 `portMAX_DELAY`) | RX 풀 고갈 시 영구 대기 |
-| b | `ethernetif_input` | 세마포어 반환값과 무관하게 매번 수신 재시도 + 진입 시 `RX_ALLOC_ERROR` 해제 | 위 a만으로는 못 풀린다 |
-| c | `RxAllocStatus` 선언 | `volatile` | 스레드 간 갱신이 캐싱될 수 있음 |
-| d | `ethernet_link_thread` | 루프 **안**에서 `linkchanged = 0U;` 초기화 | **속도/듀플렉스 불일치가 고착** (아래) |
-| e | `low_level_init`의 PHY 블록 | `EthPhy_Recover("boot")` 호출 + **링크를 올리지 않고** 무조건 down으로 두기 | 부팅 직후의 미완료/실패 협상값(`10M-HALF` 등)을 래치 → 링크 스레드가 재평가 못 함 → 고착 |
-| f | `ethernet_link_thread` | 세 번째 분기(링크 유지 중 속도 변경 시 MAC 재적용) + 링크 장기 down 시 `EthPhy_Recover()` 재협상 | PHY가 잘못 협상되면 **스스로 빠져나올 수단이 전혀 없다** |
-
-> **d가 왜 필요한가.** 원본은 `linkchanged`를 루프 밖에 선언하고 초기화하지 않는다. 한 번 1이 되면 계속 1이므로, 재연결 시 오토네고가 아직 안 끝나 `switch`가 `default`로 빠져도 **지난번 `speed`/`duplex`로 MAC을 설정하고 `netif_set_link_up()`까지 호출**해 버린다. 그 뒤로는 `netif`가 up이라 재평가 조건(`!netif_is_link_up`)에 걸리지 않아 **어긋난 설정이 고착된다.** 폴링 시점이 오토네고 완료 전후 어디에 걸리느냐에 달린 경합이라 "될 때도 있고 안 될 때도 있는" 형태로 나타난다.
-
 ## 10. 트러블슈팅 (겪고 해결한 것)
 
 | 증상 | 원인 | 해결 |
@@ -409,10 +394,7 @@ __enable_irq();
 
 - `docs/Memory Map.png` — STM32F429 메모리 맵
 - `docs/NUCLEO-F429ZI Datasheet.pdf` — STM32 Nucleo-144 보드 사용자 매뉴얼.
-  - **p.32 Table 12 `SB177`** — Ethernet PHY의 nRST가 MCU NRST에 연결(기본 ON). §10의 링크 LED 항목 근거
-  - **p.29 §7.11** — RMII 50MHz REF_CLK는 **PHY가 공급**한다. PHY가 안 살아나면 `HAL_ETH_Init()`의 DMA 소프트 리셋 대기가 타임아웃한다
-  - 이 리비전에는 회로도가 빠져 있다(p.86 개정 이력). 스트랩 저항값 등은 st.com의 MB1137 회로도가 필요
-- `docs/STM32F427ZI Datasheet.pdf` — MCU 데이터시트 (F427/F429 공용, Flash 프로그래밍 Table 48 등)
+- `docs/STM32F427ZI Datasheet.pdf` — MCU 데이터시트
 
 ## 개발 환경
 - **보드**: NUCLEO-F429ZI (STM32F429ZI, Flash 2MB / SRAM 256KB[192KB+64KB CCM])
